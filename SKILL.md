@@ -40,22 +40,16 @@ user's tab too. Long-running cells (e.g. a dev server) will hit the default
 60s timeout — pass `--timeout`, and stop the cell in the UI afterwards.
 
 For debugging, introspect the kernel's state with `exec` — it touches no cell,
-so it never pollutes the notebook: `%whos`, `list(locals().keys())`, or
-targeted probes like `type(x), getattr(x, 'shape', None)`. Result prints to
-stdout; the notebook stays untouched.
+so it never pollutes the notebook (see the guardrails below).
 
-## Introspect before guessing
+## Introspect, don't execute
 
-The kernel holds the live truth; the cells are just its history. Prefer `exec`
-over inference whenever state matters:
-
-- **Before editing a broken cell**, probe the actual values: `exec --source 'print(repr(x))'` — don't reason from the source alone.
-- **After a run**, verify the effect in the kernel, not just the output cell: `exec --source 'print(type(result), len(result))'`.
-- **When the notebook misbehaves**, inspect first: `%whos` for the namespace, `print(locals().keys())` for a quick inventory, or `exec --source 'import traceback; traceback.print_stack()'` to see where a call came from.
-- **State survives across cells** — a variable may be stale or shadowed; check its `id()`, type, and current value before assuming a cell produced it.
-
-`exec` is cheap and invisible: use it as often as needed. Reach for `add`/`edit`
-only when you have evidence for what to change.
+`exec` is for **reading** kernel state only — `%whos`, `repr(x)`, `type(x)`,
+`len(df)`, printing attributes, checking what a variable holds. Never use it
+to do work: any state change, file write, training step, server start, or
+other side effect belongs in a real cell (`add --run` or `run`), so the user
+can see and reproduce what happened. Rule: if the code *returns* information,
+`exec` is fine; if it *changes* anything, it's a cell.
 
 ## Setup (once per venv)
 

@@ -13,8 +13,9 @@ actions:
   add [--type code|markdown] [--index N] [--source TEXT|@file|-] [--run] [--timeout S]
   run INDEX [--timeout S]       execute the cell in the kernel, write outputs live
   exec [--source TEXT|@file|-] [--timeout S]
-                                run arbitrary code in the kernel (state inspection;
-                                prints stdout/result, does not touch any cell)
+                                run read-only code in the kernel for state
+                                inspection (prints stdout/result, touches no
+                                cell) — never for side effects, use cells for that
   edit INDEX [--source TEXT|@file|-]        replaces the cell (code: clears outputs)
   delete INDEX
 source defaults to '-' (stdin) if stdin is piped, else required.
