@@ -10,7 +10,7 @@ Edit a notebook through its live CRDT collaboration room, not the file on disk. 
 ## Steps
 
 1. **Inspect first.** `python3 scripts/jupyter_cells.py NOTEBOOK.ipynb list`
-   Done when: one line per cell prints (`index  type  first line`, plus a truncated output summary — `ERR Exc: msg` if the cell errored, `> stdout tail` or `= result` if it ran — and `*edited*`/`*new*` view markers). This proves the server, token discovery, and CRDT deps all work before you mutate anything.
+   Done when: a near-full dump prints — every cell's `[exec_count]`, type, source and outputs, truncated generously with `...`. This views the whole notebook (refreshes all viewed-stamps, so `edit`/`run` become allowed) and proves the server, token discovery, and CRDT deps work. Use `list --brief` for a compact one-line-per-cell scan — brief does *not* refresh stamps.
 
 2. **Mutate.** `read`, `add`, `edit`, `delete`, `run`, `exec` — full syntax in the actions table below. `--source` takes `'inline text'`, `@path/to/file`, or `-` (stdin). For multi-cell work, run the script once per cell.
    Done when: the command prints `live doc: X -> Y cells` with the count change you intended (edit keeps the count equal). `list` afterwards confirms the cell content and any outputs.
@@ -20,10 +20,12 @@ Edit a notebook through its live CRDT collaboration room, not the file on disk. 
 ## Actions
 
 ```
-list                                cells: [exec_count] type, truncated source,
-                                    output status (ERR / > stream / = result), markers
-read INDEX                          print a cell's full source + its outputs;
-                                    marks it as viewed
+list [--brief]                 near-full dump: [exec_count], type, source and
+                               outputs per cell, truncated generously ('...').
+                               Views all cells (refreshes seen-stamps).
+                               --brief = compact one line per cell (no stamp refresh)
+read INDEX                     print a cell's full source + its outputs;
+                               marks it as viewed
 add  [--type code|markdown] [--index N] [--source S] [--run] [--timeout S]
                                     no --index = append; --run executes after adding
 run  INDEX [--timeout S]            execute in the kernel, write outputs live
@@ -67,11 +69,11 @@ One-time per server restart, not per session.
 Every cell carries an `agent_seen` hash in its `metadata` (written in-place in
 the CRDT doc — the hash value never needs to be shown to the agent):
 
-- `add` stamps what it wrote; `read` refreshes the stamp (viewing).
+- `add` stamps what it wrote; `read` and the full `list` view refresh stamps
+  (that is "viewing"). `--brief` is a scan, not a view — no stamps refreshed.
 - `edit` and `run` are **gated**: a stale or missing stamp (`*edited*` / `*new*`
   in `list`) makes them refuse with a message telling the agent to `read` the
-  cell first. `list` shows the markers but does not refresh stamps — listing
-  is not viewing.
+  cell first.
 - The hash lives in cell `metadata`, so it persists in the notebook file and
   the agent only ever sees the boolean, never the hash itself.
 
