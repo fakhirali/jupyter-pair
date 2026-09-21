@@ -12,7 +12,7 @@ Edit a notebook through its live CRDT collaboration room, not the file on disk. 
 1. **Inspect first.** `python3 scripts/jupyter_cells.py NOTEBOOK.ipynb list`
    Done when: a near-full dump prints — every cell's `[exec_count]`, type, source and outputs, truncated generously with `...`. This views the whole notebook (refreshes all viewed-stamps, so `edit`/`run` become allowed) and proves the server, token discovery, and CRDT deps work.
 
-2. **Mutate.** `read`, `add`, `edit`, `delete`, `run`, `exec` — full syntax in the actions table below. `--source` takes `'inline text'`, `@path/to/file`, or `-` (stdin). For multi-cell work, run the script once per cell.
+2. **Mutate.** `add`, `edit`, `delete`, `run`, `exec` — full syntax in the actions table below. `--source` takes `'inline text'`, `@path/to/file`, or `-` (stdin). For multi-cell work, run the script once per cell.
    Done when: the command prints `live doc: X -> Y cells` with the count change you intended (edit keeps the count equal). `list` afterwards confirms the cell content and any outputs.
 
 3. **Tell the user to look.** The cells are already on screen if their tab is open; no prompt will appear.
@@ -22,9 +22,11 @@ Edit a notebook through its live CRDT collaboration room, not the file on disk. 
 ```
 list                           near-full dump: [exec_count], type, source and
                                outputs per cell, truncated generously ('...').
-                               Views all cells (refreshes seen-stamps).
-read INDEX                     print a cell's full source + its outputs;
-                               marks it as viewed
+                               Views all cells (refreshes seen-stamps). Prefer
+                               this over read — it gives the whole notebook.
+read INDEX                     one cell's full source + outputs (rarely needed:
+                               use list, or read when you only care about one
+                               cell and want to skip a full dump)
 add  [--type code|markdown] [--index N] [--source S] [--run] [--timeout S]
                                     no --index = append; --run executes after adding
 run  INDEX [--timeout S]            execute in the kernel, write outputs live
