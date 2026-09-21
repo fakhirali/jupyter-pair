@@ -6,9 +6,12 @@ dialog, no reload. Requires jupyter-collaboration on the Jupyter server.
 
 usage: jupyter_cells.py NOTEBOOK.ipynb ACTION [args]
 actions:
-  list                        near-full dump: every cell's [exec_count], type,
+  list [--brief]              near-full dump: every cell's [exec_count], type,
                               source and outputs, generously truncated ('...').
                               Views all cells (refreshes the seen-stamps).
+  text                        whole notebook as percent-format text with outputs
+                              as '#| ' comment lines — pipe through grep/sed.
+                              Views all cells (refreshes stamps)
   read INDEX                  print full source of one cell + outputs (refreshes stamp)
   add [--type code|markdown] [--index N] [--source TEXT|@file|-] [--run] [--timeout S]
   run INDEX [--timeout S]       execute the cell in the kernel, write outputs live
@@ -342,7 +345,7 @@ async def yedit(nb_path: Path, action, args):
                 last = len(ynb.ycells)
             n_before = len(ynb.ycells)
 
-            if action not in ("list", "exec"):
+            if action not in ("list", "text", "exec"):
                 i = args.get("index")
                 if i is None:
                     raise SystemExit(f"action `{action}` needs a cell index — run "
@@ -352,6 +355,36 @@ async def yedit(nb_path: Path, action, args):
                         f"cell {i} does not exist — the notebook has {n_before} cells "
                         f"(indices 0..{n_before - 1}). Run `list` to see current indices; "
                         "indices shift when cells are inserted or deleted.")
+
+            if action == "text":
+                for i in range(n_before):
+                    c = ynb.get_cell(i)
+                    ct = c["cell_type"]
+                    print(f"# %% [{i}] {ct}")
+                    src = ("".join(c["source"]) if isinstance(c["source"], list)
+                           else c["source"])
+                    if ct == "markdown":
+                        print("\n".join(f"# {ln}" for ln in src.splitlines()))
+                    else:
+                        print(trunc(src, 4000))
+                    outs = c.get("outputs") or []
+                    for o in outs:
+                        t = o.get("output_type")
+                        if t == "stream":
+                            body = trunc(o.get("text", ""), 2000).strip() or "(empty stream)"
+                            print("\n".join(f"#| → {ln}" for ln in body.splitlines()))
+                        elif t == "execute_result":
+                            body = trunc(o.get("data", {}).get("text/plain", ""), 2000).strip()
+                            print("\n".join(f"#| = {ln}" for ln in body.splitlines() or ["(empty result)"]))
+                        elif t == "error":
+                            print(f"#| ERR {o.get('ename')}: {trunc(str(o.get('evalue', '')), 200)}")
+                        elif t == "display_data":
+                            print(f"#| [display: {','.join(o.get('data', {}).keys())}]")
+                    print()
+                for i in range(n_before):  # full view refreshes all stamps
+                    stamp_cell(ynb, i)
+                await asyncio.sleep(1)
+                return
 
             if action == "list":
                 for i in range(n_before):

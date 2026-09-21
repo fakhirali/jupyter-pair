@@ -27,6 +27,9 @@ list                           near-full dump: [exec_count], type, source and
 read INDEX                     one cell's full source + outputs (rarely needed:
                                use list, or read when you only care about one
                                cell and want to skip a full dump)
+text                           whole notebook as percent-format text (outputs
+                               as `#| ` comment lines) — pipe through
+                               grep/sed/awk for traversal; marks all viewed
 add  [--type code|markdown] [--index N] [--source S] [--run] [--timeout S]
                                     no --index = append; --run executes after adding
 run  INDEX [--timeout S]            execute in the kernel, write outputs live
@@ -88,3 +91,4 @@ the CRDT doc — the hash value never needs to be shown to the agent):
 ## How it works
 
 Mechanism, room IDs, and constraints: see [REFERENCE.md](REFERENCE.md).
+Roadmap for a fully synced, writable text file: [docs/TEXT_FILE_SYNC.md](https://github.com/fakhirali/jupyter-pair/blob/main/docs/TEXT_FILE_SYNC.md).
