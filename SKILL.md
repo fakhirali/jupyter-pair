@@ -10,22 +10,24 @@ Edit a notebook through its live CRDT collaboration room, not the file on disk. 
 ## Steps
 
 1. **Inspect first.** `python3 scripts/jupyter_cells.py NOTEBOOK.ipynb list`
-   Done when: one line per cell prints (`index  type  first line`). This proves the server, token discovery, and CRDT deps all work before you mutate anything.
+   Done when: one line per cell prints (`index  type  first line`, plus a truncated output summary — `ERR Exc: msg` if the cell errored, `> stdout tail` or `= result` if it ran — and `*edited*`/`*new*` view markers). This proves the server, token discovery, and CRDT deps all work before you mutate anything.
 
-2. **Mutate.** `read`, `add`, `edit`, `delete` — full syntax in the actions table below. `--source` takes `'inline text'`, `@path/to/file`, or `-` (stdin). For multi-cell work, run the script once per cell.
-   Done when: the command prints `live doc: X -> Y cells` followed by `disk: Y cells` — the disk line is the server confirming it persisted the change. `X -> Y` must match the change you intended (edit keeps the count equal).
+2. **Mutate.** `read`, `add`, `edit`, `delete`, `run`, `exec` — full syntax in the actions table below. `--source` takes `'inline text'`, `@path/to/file`, or `-` (stdin). For multi-cell work, run the script once per cell.
+   Done when: the command prints `live doc: X -> Y cells` with the count change you intended (edit keeps the count equal). `list` afterwards confirms the cell content and any outputs.
 
 3. **Tell the user to look.** The cells are already on screen if their tab is open; no prompt will appear.
 
 ## Actions
 
 ```
-list                                show every cell: index, type, first line
-read INDEX                          print a cell's full source
+list                                cells: index, type, truncated source, output
+                                    status (ERR / > stream / = result), view markers
+read INDEX                          print a cell's full source (marks it as viewed)
 add  [--type code|markdown] [--index N] [--source S] [--run] [--timeout S]
                                     no --index = append; --run executes after adding
 run  INDEX [--timeout S]            execute in the kernel, write outputs live
-edit INDEX [--source S]             replaces the cell (code: clears outputs)
+exec [--source S] [--timeout S]     run code in the kernel, print result — no cell touched
+edit INDEX [--source S]             replace a cell's source (preserves outputs)
 delete INDEX
 ```
 

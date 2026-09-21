@@ -208,6 +208,27 @@ def describe_cell(c):
     return f"{c['cell_type']:8} {first[0][:70] if first else ''}"
 
 
+def output_summary(c):
+    """Very truncated status of a cell's outputs: errored, result, or stream tail."""
+    outs = c.get("outputs") or []
+    for o in outs:
+        if o.get("output_type") == "error":
+            return f"  ERR {o.get('ename', '')}: {str(o.get('evalue', ''))[:50]}"
+    last = outs[-1] if outs else None
+    if not last:
+        return ""
+    t = last.get("output_type")
+    if t == "stream":
+        lines = last.get("text", "").strip().splitlines()
+        return f"  > {lines[-1][:50]}" if lines else ""
+    if t == "execute_result":
+        lines = last.get("data", {}).get("text/plain", "").strip().splitlines()
+        return f"  = {lines[0][:50]}" if lines else ""
+    if t == "display_data":
+        return f"  [{','.join(last.get('data', {}).keys())}]"
+    return f"  [{t}]"
+
+
 STAMP_KEY = "agent_seen"
 GUARD_MSG = ("cell {i} was edited since it was last viewed — view it first: "
              "run `read {i}`, then retry")
@@ -316,7 +337,10 @@ async def yedit(nb_path: Path, action, args):
 
             if action not in ("list", "exec"):
                 i = args.get("index")
-                if i is not None and (i < 0 or i >= n_before):
+                if i is None:
+                    raise SystemExit(f"action `{action}` needs a cell index — run "
+                                     "`list` first to see indices")
+                if i < 0 or i >= n_before:
                     raise SystemExit(
                         f"cell {i} does not exist — the notebook has {n_before} cells "
                         f"(indices 0..{n_before - 1}). Run `list` to see current indices; "
@@ -324,9 +348,14 @@ async def yedit(nb_path: Path, action, args):
 
             if action == "list":
                 for i in range(n_before):
+                    c = ynb.get_cell(i)
                     state, _ = view_state(ynb, i)
                     mark = {"fresh": "", "edited": "  *edited*", "new": "  *new*"}[state]
-                    print(f"{i:3} {describe_cell(ynb.get_cell(i))}{mark}")
+                    desc = describe_cell(c)
+                    out = output_summary(c)
+                    if out:
+                        desc = f"{c['cell_type']:8} {desc[10:52]}"
+                    print(f"{i:3} {desc}{out}{mark}")
                 return
 
             if action == "read":
@@ -424,11 +453,6 @@ def main():
                 print(exits[0].code, file=sys.stderr)
             sys.exit(1)
         raise
-
-    # completion check: server has persisted the shared doc to disk
-    disk = http_json("GET", f"{base}/api/contents/{nb_path.name}", token,
-                     what=f"Notebook '{nb_path.name}'")["content"]
-    print(f"disk: {len(disk['cells'])} cells")
 
 
 if __name__ == "__main__":
