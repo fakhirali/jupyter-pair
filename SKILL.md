@@ -20,9 +20,10 @@ Edit a notebook through its live CRDT collaboration room, not the file on disk. 
 ## Actions
 
 ```
-list                                cells: index, type, truncated source, output
-                                    status (ERR / > stream / = result), view markers
-read INDEX                          print a cell's full source (marks it as viewed)
+list                                cells: [exec_count] type, truncated source,
+                                    output status (ERR / > stream / = result), markers
+read INDEX                          print a cell's full source + its outputs;
+                                    marks it as viewed
 add  [--type code|markdown] [--index N] [--source S] [--run] [--timeout S]
                                     no --index = append; --run executes after adding
 run  INDEX [--timeout S]            execute in the kernel, write outputs live

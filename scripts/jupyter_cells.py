@@ -351,16 +351,28 @@ async def yedit(nb_path: Path, action, args):
                     c = ynb.get_cell(i)
                     state, _ = view_state(ynb, i)
                     mark = {"fresh": "", "edited": "  *edited*", "new": "  *new*"}[state]
-                    desc = describe_cell(c)
-                    out = output_summary(c)
-                    if out:
-                        desc = f"{c['cell_type']:8} {desc[10:52]}"
-                    print(f"{i:3} {desc}{out}{mark}")
+                    first = ("".join(c["source"]) if isinstance(c["source"], list)
+                             else c["source"]).strip().splitlines()
+                    ec = (f"[{str(c.get('execution_count') or '-'):>3}]"
+                          if c["cell_type"] == "code" else "     ")
+                    print(f"{i:3} {ec} {c['cell_type']:8} {first[0][:48] if first else ''}"
+                          f"{output_summary(c)}{mark}")
                 return
 
             if action == "read":
                 c = ynb.get_cell(args["index"])
                 print("".join(c["source"]) if isinstance(c["source"], list) else c["source"])
+                for o in c.get("outputs") or []:
+                    t = o.get("output_type")
+                    if t == "stream":
+                        print("\n--- stream (stdout) ---\n" + o["text"][:2000])
+                    elif t == "execute_result":
+                        print("\n--- result ---\n"
+                              + o.get("data", {}).get("text/plain", "")[:2000])
+                    elif t == "error":
+                        print(f"\n--- error ---\n{o['ename']}: {o['evalue']}")
+                    elif t == "display_data":
+                        print(f"\n--- display: {','.join(o.get('data', {}).keys())} ---")
                 stamp_cell(ynb, args["index"])  # viewing refreshes the stamp
                 await asyncio.sleep(1)
                 return
