@@ -202,6 +202,10 @@ async def run_kernel(base, token, nb_name, code, timeout):
     return await asyncio.to_thread(execute)
 
 
+def trunc(s, n):
+    return s[:n] + ("..." if len(s) > n else "")
+
+
 def describe_cell(c):
     src = "".join(c["source"]) if isinstance(c["source"], list) else c["source"]
     first = src.strip().splitlines()
@@ -209,21 +213,21 @@ def describe_cell(c):
 
 
 def output_summary(c):
-    """Very truncated status of a cell's outputs: errored, result, or stream tail."""
+    """Truncated status of a cell's outputs: errored, result, or stream tail."""
     outs = c.get("outputs") or []
     for o in outs:
         if o.get("output_type") == "error":
-            return f"  ERR {o.get('ename', '')}: {str(o.get('evalue', ''))[:50]}"
+            return f"  ERR {o.get('ename', '')}: {trunc(str(o.get('evalue', '')), 80)}"
     last = outs[-1] if outs else None
     if not last:
         return ""
     t = last.get("output_type")
     if t == "stream":
         lines = last.get("text", "").strip().splitlines()
-        return f"  > {lines[-1][:50]}" if lines else ""
+        return f"  > {trunc(lines[-1], 70)}" if lines else ""
     if t == "execute_result":
         lines = last.get("data", {}).get("text/plain", "").strip().splitlines()
-        return f"  = {lines[0][:50]}" if lines else ""
+        return f"  = {trunc(lines[0], 70)}" if lines else ""
     if t == "display_data":
         return f"  [{','.join(last.get('data', {}).keys())}]"
     return f"  [{t}]"
@@ -355,7 +359,8 @@ async def yedit(nb_path: Path, action, args):
                              else c["source"]).strip().splitlines()
                     ec = (f"[{str(c.get('execution_count') or '-'):>3}]"
                           if c["cell_type"] == "code" else "     ")
-                    print(f"{i:3} {ec} {c['cell_type']:8} {first[0][:48] if first else ''}"
+                    print(f"{i:3} {ec} {c['cell_type']:8} "
+                          f"{trunc(first[0], 90) if first else ''}"
                           f"{output_summary(c)}{mark}")
                 return
 
@@ -365,10 +370,10 @@ async def yedit(nb_path: Path, action, args):
                 for o in c.get("outputs") or []:
                     t = o.get("output_type")
                     if t == "stream":
-                        print("\n--- stream (stdout) ---\n" + o["text"][:2000])
+                        print("\n--- stream (stdout) ---\n" + trunc(o["text"], 2000))
                     elif t == "execute_result":
                         print("\n--- result ---\n"
-                              + o.get("data", {}).get("text/plain", "")[:2000])
+                              + trunc(o.get("data", {}).get("text/plain", ""), 2000))
                     elif t == "error":
                         print(f"\n--- error ---\n{o['ename']}: {o['evalue']}")
                     elif t == "display_data":
