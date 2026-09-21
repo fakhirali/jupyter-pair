@@ -32,23 +32,52 @@ RUNTIME_DIR = Path(
 USAGE = __doc__
 
 
-def find_server(nb_path: Path):
-    """Return (base_url, token, pid) for the running server serving nb_path."""
+def all_servers():
     servers = []
     for f in sorted(RUNTIME_DIR.glob("jpserver-*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
         try:
             info = json.loads(f.read_text())
         except Exception:
             continue
-        if "token" not in info:
-            continue
-        servers.append(info)
+        if "token" in info:
+            servers.append(info)
+    return servers
+
+
+def find_server(nb_path: Path):
+    """Return (base_url, token, pid) for the running server serving nb_path."""
+    servers = all_servers()
+    for info in servers:
         if str(nb_path).startswith(os.path.realpath(info["root_dir"]) + os.sep):
             return info["url"].rstrip("/"), info["token"], info["pid"]
     raise SystemExit(
         f"No running jupyter server serves {nb_path}.\n"
-        f"Servers found: {[(s['root_dir'], s['port']) for s in servers]}"
+        f"Servers found: {[(s['root_dir'], s['port']) for s in servers]}\n"
+        "Fix: start jupyter-lab in the notebook's directory (or a parent of it), "
+        "or pass the notebook's full path."
     )
+
+
+def suggest_notebook(nb_path: Path):
+    """Descriptive error when the notebook path does not exist (e.g. renamed)."""
+    import difflib
+    candidates = []
+    for info in all_servers():
+        root = Path(os.path.realpath(info["root_dir"]))
+        candidates += [str(h) for h in root.glob(f"**/{nb_path.name}")]
+        candidates += [str(h) for h in root.rglob("*.ipynb")
+                       if ".ipynb_checkpoints" not in h.parts]
+    candidates = list(dict.fromkeys(candidates))
+    close_names = set(difflib.get_close_matches(nb_path.name,
+                                                [Path(c).name for c in candidates], n=5))
+    matches = [c for c in candidates if Path(c).name in close_names][:5]
+    lines = [f"Notebook not found: {nb_path}"]
+    if matches:
+        lines.append("Closest matches under running servers (use one of these paths):")
+        lines += [f"  {m}" for m in matches]
+    else:
+        lines.append("No similarly-named notebook exists under any running server's root dir.")
+    raise SystemExit("\n".join(lines))
 
 
 def server_python(pid: int) -> str | None:
@@ -85,11 +114,21 @@ def ensure_deps(pid: int):
         )
 
 
-def http_json(method: str, url: str, token: str, body=None):
+def http_json(method: str, url: str, token: str, body=None, what=""):
+    import urllib.error
     req = urllib.request.Request(
         url, data=json.dumps(body).encode() if body is not None else None, method=method,
         headers={"Authorization": f"token {token}", "Content-Type": "application/json"})
-    return json.load(urllib.request.urlopen(req, timeout=10))
+    try:
+        return json.load(urllib.request.urlopen(req, timeout=10))
+    except urllib.error.HTTPError as e:
+        if e.code == 404 and what:
+            raise SystemExit(
+                f"{what} not found on the server ({url}). "
+                "The file may have been renamed, moved, or deleted — run "
+                f"`{sys.argv[0]} <notebook.ipynb> list` with the correct path, or check "
+                "the notebook's current location in the JupyterLab file browser.")
+        raise
 
 
 async def run_kernel(base, token, nb_name, code, timeout):
@@ -255,7 +294,8 @@ async def yedit(nb_path: Path, action, args):
 
     base, token, _ = find_server(nb_path)
     session = http_json("PUT", f"{base}/api/collaboration/session/{nb_path.name}", token,
-                        {"format": "json", "type": "notebook"})
+                        {"format": "json", "type": "notebook"},
+                        what=f"Notebook '{nb_path.name}'")
     room_id = f"{session['format']}:{session['type']}:{session['fileId']}"
     url = (f"{base.replace('http', 'ws', 1)}/api/collaboration/room/{room_id}"
            f"?sessionId={session['sessionId']}&token={token}")
@@ -273,6 +313,14 @@ async def yedit(nb_path: Path, action, args):
                     break
                 last = len(ynb.ycells)
             n_before = len(ynb.ycells)
+
+            if action not in ("list", "exec"):
+                i = args.get("index")
+                if i is not None and (i < 0 or i >= n_before):
+                    raise SystemExit(
+                        f"cell {i} does not exist — the notebook has {n_before} cells "
+                        f"(indices 0..{n_before - 1}). Run `list` to see current indices; "
+                        "indices shift when cells are inserted or deleted.")
 
             if action == "list":
                 for i in range(n_before):
@@ -348,6 +396,8 @@ def main():
     if len(argv) < 2 or argv[1] in ("-h", "--help"):
         raise SystemExit(USAGE)
     nb_path = Path(argv[0]).expanduser().resolve()
+    if not nb_path.exists():
+        suggest_notebook(nb_path)
     action, rest = argv[1], argv[2:]
 
     base, token, pid = find_server(nb_path)
@@ -355,10 +405,29 @@ def main():
 
     args = parse_flags(rest)
 
-    asyncio.run(yedit(nb_path, action, args))
+    try:
+        asyncio.run(yedit(nb_path, action, args))
+    except SystemExit:
+        raise
+    except BaseExceptionGroup as eg:
+        # anyio wraps errors raised inside the CRDT task group; surface the
+        # descriptive message instead of a wall of traceback
+        def leaves(group):
+            for exc in group.exceptions:
+                if isinstance(exc, BaseExceptionGroup):
+                    yield from leaves(exc)
+                else:
+                    yield exc
+        exits = [e for e in leaves(eg) if isinstance(e, SystemExit)]
+        if exits:
+            if exits[0].code:
+                print(exits[0].code, file=sys.stderr)
+            sys.exit(1)
+        raise
 
     # completion check: server has persisted the shared doc to disk
-    disk = http_json("GET", f"{base}/api/contents/{nb_path.name}", token)["content"]
+    disk = http_json("GET", f"{base}/api/contents/{nb_path.name}", token,
+                     what=f"Notebook '{nb_path.name}'")["content"]
     print(f"disk: {len(disk['cells'])} cells")
 
 
