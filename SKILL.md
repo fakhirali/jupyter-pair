@@ -11,6 +11,7 @@ Edit a notebook through its live CRDT collaboration room, not the file on disk. 
 
 1. **Inspect first.** `python3 scripts/jupyter_cells.py NOTEBOOK.ipynb list`
    Done when: a near-full dump prints — every cell's `[exec_count]`, type, source and outputs, truncated generously with `...`. This views the whole notebook (refreshes all viewed-stamps, so `edit`/`run` become allowed) and proves the server, token discovery, and CRDT deps work.
+   For searching and code traversal, prefer `text` piped through bash (`text | grep -n ...`, `text | sed -n`): every hit's nearest `# %% [i]` marker above it gives the cell index to target with `edit`/`run`.
 
 2. **Mutate.** `add`, `edit`, `delete`, `run`, `exec` — full syntax in the actions table below. `--source` takes `'inline text'`, `@path/to/file`, or `-` (stdin). For multi-cell work, run the script once per cell.
    Done when: the command prints `live doc: X -> Y cells` with the count change you intended (edit keeps the count equal). `list` afterwards confirms the cell content and any outputs.
@@ -28,8 +29,12 @@ read INDEX                     one cell's full source + outputs (rarely needed:
                                use list, or read when you only care about one
                                cell and want to skip a full dump)
 text                           whole notebook as percent-format text (outputs
-                               as `#| ` comment lines) — pipe through
-                               grep/sed/awk for traversal; marks all viewed
+                               as `#| ` comment lines). The reading surface:
+                               pipe it through any bash text tools — grep,
+                               sed, awk, sort, diff — for traversal and
+                               understanding. It is a projection, not an
+                               input: make changes with edit/add, never by
+                               patching this text. Marks all viewed
 add  [--type code|markdown] [--index N] [--source S] [--run] [--timeout S]
                                     no --index = append; --run executes after adding
 run  INDEX [--timeout S]            execute in the kernel, write outputs live
