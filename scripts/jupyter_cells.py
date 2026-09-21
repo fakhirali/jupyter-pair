@@ -29,6 +29,7 @@ import os
 import subprocess
 import sys
 import urllib.request
+from queue import Empty
 from pathlib import Path
 
 RUNTIME_DIR = Path(
@@ -152,6 +153,12 @@ async def run_kernel(base, token, nb_name, code, timeout):
     sessions = http_json("GET", f"{base}/api/sessions", token)
     kernel = next((s["kernel"] for s in sessions if s["path"] == nb_name), None)
     if kernel is None:
+        kernels = http_json("GET", f"{base}/api/kernels", token)
+        if len(kernels) == 1:
+            print(f"note: no session for {nb_name} (notebook closed or renamed) — "
+                  "using the server's only kernel")
+            kernel = kernels[0]
+    if kernel is None:
         raise SystemExit(f"No kernel session for {nb_name} — open the notebook first.")
     cf = find_connection_file(kernel["id"])
 
@@ -185,12 +192,15 @@ async def run_kernel(base, token, nb_name, code, timeout):
             msg_id = kc.execute(code)
             deadline = time.monotonic() + timeout
             while not done.is_set():
-                msg = kc.get_iopub_msg(timeout=2)
+                if time.monotonic() > deadline:
+                    raise TimeoutError(f"cell did not finish in {timeout}s")
+                try:
+                    msg = kc.get_iopub_msg(timeout=5)
+                except Empty:
+                    continue  # quiet period (long cell, tool exec, LLM latency)
                 if msg.get("parent_header", {}).get("msg_id") != msg_id:
                     continue
                 hook(msg)
-                if time.monotonic() > deadline:
-                    raise TimeoutError(f"cell did not finish in {timeout}s")
             # execution_count comes from the shell-channel reply
             reply = kc.get_shell_msg(timeout=10)
             while reply["parent_header"].get("msg_id") != msg_id:
@@ -313,8 +323,18 @@ async def do_run(ynb, args, base, token, nb_name):
                                            args.get("timeout") or 60)
     ynb.set_cell(idx, {**cell, "outputs": outputs, "execution_count": exec_count})
     await asyncio.sleep(2.5)  # flush outputs to the room; server autosaves
-    kinds = [o.get("output_type") for o in outputs]
-    print(f"ran cell {idx} [{exec_count}]: {kinds}")
+    print(f"ran cell {idx} [{exec_count}]")
+    for o in outputs:
+        t = o.get("output_type")
+        if t == "stream":
+            print("\n--- stream (stdout) ---\n" + trunc(o["text"], 2000))
+        elif t == "execute_result":
+            print("\n--- result ---\n"
+                  + trunc(o.get("data", {}).get("text/plain", ""), 2000))
+        elif t == "error":
+            print(f"\n--- error ---\n{o['ename']}: {o['evalue']}")
+        elif t == "display_data":
+            print(f"\n--- display: {','.join(o.get('data', {}).keys())} ---")
 
 
 async def yedit(nb_path: Path, action, args):
@@ -345,7 +365,7 @@ async def yedit(nb_path: Path, action, args):
                 last = len(ynb.ycells)
             n_before = len(ynb.ycells)
 
-            if action not in ("list", "text", "exec"):
+            if action in ("read", "edit", "run", "delete"):
                 i = args.get("index")
                 if i is None:
                     raise SystemExit(f"action `{action}` needs a cell index — run "
