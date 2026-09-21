@@ -6,10 +6,9 @@ dialog, no reload. Requires jupyter-collaboration on the Jupyter server.
 
 usage: jupyter_cells.py NOTEBOOK.ipynb ACTION [args]
 actions:
-  list [--brief]              near-full dump: every cell's [exec_count], type,
+  list                        near-full dump: every cell's [exec_count], type,
                               source and outputs, generously truncated ('...').
                               Views all cells (refreshes the seen-stamps).
-                              --brief = compact one line per cell (no stamp refresh)
   read INDEX                  print full source of one cell + outputs (refreshes stamp)
   add [--type code|markdown] [--index N] [--source TEXT|@file|-] [--run] [--timeout S]
   run INDEX [--timeout S]       execute the cell in the kernel, write outputs live
@@ -354,7 +353,6 @@ async def yedit(nb_path: Path, action, args):
                         "indices shift when cells are inserted or deleted.")
 
             if action == "list":
-                brief = args.get("brief", False)
                 for i in range(n_before):
                     c = ynb.get_cell(i)
                     state, _ = view_state(ynb, i)
@@ -363,12 +361,6 @@ async def yedit(nb_path: Path, action, args):
                              else c["source"])
                     ec = (f"[{str(c.get('execution_count') or '-'):>3}]"
                           if c["cell_type"] == "code" else "     ")
-                    if brief:
-                        line = (f"{c['cell_type']:8} "
-                                f"{trunc(first.strip().replace(chr(10), ' / '), 90)}"
-                                if first.strip() else c["cell_type"])
-                        print(f"{i:3} {ec} {line}{output_summary(c)}{mark}")
-                        continue
                     # full-ish view: whole file, generous truncation
                     hdr = f"{i:3} {ec} {c['cell_type']:8}{mark}".rstrip()
                     print(hdr)
@@ -393,10 +385,9 @@ async def yedit(nb_path: Path, action, args):
                                 print(f"     ERR {ln}")
                         elif t == "display_data":
                             print(f"     [display: {','.join(o.get('data', {}).keys())}]")
-                if not brief:
-                    for i in range(n_before):  # a full view refreshes all stamps
-                        stamp_cell(ynb, i)
-                    await asyncio.sleep(1)
+                for i in range(n_before):  # a full view refreshes all stamps
+                    stamp_cell(ynb, i)
+                await asyncio.sleep(1)
                 return
 
             if action == "read":

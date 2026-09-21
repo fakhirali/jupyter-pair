@@ -10,7 +10,7 @@ Edit a notebook through its live CRDT collaboration room, not the file on disk. 
 ## Steps
 
 1. **Inspect first.** `python3 scripts/jupyter_cells.py NOTEBOOK.ipynb list`
-   Done when: a near-full dump prints — every cell's `[exec_count]`, type, source and outputs, truncated generously with `...`. This views the whole notebook (refreshes all viewed-stamps, so `edit`/`run` become allowed) and proves the server, token discovery, and CRDT deps work. Use `list --brief` for a compact one-line-per-cell scan — brief does *not* refresh stamps.
+   Done when: a near-full dump prints — every cell's `[exec_count]`, type, source and outputs, truncated generously with `...`. This views the whole notebook (refreshes all viewed-stamps, so `edit`/`run` become allowed) and proves the server, token discovery, and CRDT deps work.
 
 2. **Mutate.** `read`, `add`, `edit`, `delete`, `run`, `exec` — full syntax in the actions table below. `--source` takes `'inline text'`, `@path/to/file`, or `-` (stdin). For multi-cell work, run the script once per cell.
    Done when: the command prints `live doc: X -> Y cells` with the count change you intended (edit keeps the count equal). `list` afterwards confirms the cell content and any outputs.
@@ -20,10 +20,9 @@ Edit a notebook through its live CRDT collaboration room, not the file on disk. 
 ## Actions
 
 ```
-list [--brief]                 near-full dump: [exec_count], type, source and
+list                           near-full dump: [exec_count], type, source and
                                outputs per cell, truncated generously ('...').
                                Views all cells (refreshes seen-stamps).
-                               --brief = compact one line per cell (no stamp refresh)
 read INDEX                     print a cell's full source + its outputs;
                                marks it as viewed
 add  [--type code|markdown] [--index N] [--source S] [--run] [--timeout S]
@@ -44,6 +43,19 @@ For debugging, introspect the kernel's state with `exec` — it touches no cell,
 so it never pollutes the notebook: `%whos`, `list(locals().keys())`, or
 targeted probes like `type(x), getattr(x, 'shape', None)`. Result prints to
 stdout; the notebook stays untouched.
+
+## Introspect before guessing
+
+The kernel holds the live truth; the cells are just its history. Prefer `exec`
+over inference whenever state matters:
+
+- **Before editing a broken cell**, probe the actual values: `exec --source 'print(repr(x))'` — don't reason from the source alone.
+- **After a run**, verify the effect in the kernel, not just the output cell: `exec --source 'print(type(result), len(result))'`.
+- **When the notebook misbehaves**, inspect first: `%whos` for the namespace, `print(locals().keys())` for a quick inventory, or `exec --source 'import traceback; traceback.print_stack()'` to see where a call came from.
+- **State survives across cells** — a variable may be stale or shadowed; check its `id()`, type, and current value before assuming a cell produced it.
+
+`exec` is cheap and invisible: use it as often as needed. Reach for `add`/`edit`
+only when you have evidence for what to change.
 
 ## Setup (once per venv)
 
