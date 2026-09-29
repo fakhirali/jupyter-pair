@@ -1,5 +1,9 @@
 # jupyter-pair
 
+> **OpenCode 2 required.** The plugin targets OpenCode **V2** (`opencode v2.x`,
+> the `Plugin.define` / `ctx.tool.*` API). On OpenCode 1.x the plugin will not
+> load; the bundled bridge script has no other consumer.
+
 An agent skill that lets an AI agent **pair with you inside a live Jupyter notebook** — adding, editing, running, and deleting cells in real time while your JupyterLab tab is open. No "changed on disk" dialog. No reload. Cells and their outputs appear on your screen as the agent works, like a second collaborator with shared cursors.
 
 ## Why
@@ -42,9 +46,9 @@ the [skills CLI](https://github.com/vercel/skills) via
 `npx skills add fakhirali/jupyter-pair` — but note that route copies the skill
 instructions only and cannot provide the plugin.)
 
-**b. OpenCode plugin** — add the clone's `opencode-plugin` directory to
+**b. OpenCode 2 plugin** — add the clone's `opencode-plugin` directory to
 `plugins` in `~/.config/opencode/opencode.json` (preserve any existing
-entries), then restart OpenCode:
+entries), then restart **OpenCode 2**:
 
 ```jsonc
 // ~/.config/opencode/opencode.json
@@ -69,7 +73,7 @@ npx skills add /path/to/jupyter-pair
    notebooks — the bridge discovers servers from `~/Library/Jupyter/runtime/`,
    and the notebook must live under the server's root dir.
 2. Open a notebook in JupyterLab and attach a kernel (`run_cell` requires one).
-3. In OpenCode, `read demo.ipynb` — done when you see the paginated projection
+3. In **OpenCode 2**, `read demo.ipynb` — done when you see the paginated projection
    with `# %% [i] code|markdown` markers and no server/dependency error.
 4. Try `demo.ipynb:N` edits and `jupyter.run_cell`: cells and outputs update
    live in your JupyterLab tab.
@@ -98,6 +102,8 @@ Details and gotchas: [REFERENCE.md](REFERENCE.md).
 
 ## Requirements
 
+- **OpenCode 2** (`opencode v2.x`) — the plugin uses the V2 plugin API
+  (V1 `server()` hooks won't see these tools)
 - macOS/Linux with a local JupyterLab ≥ 4.x
 - Python ≥ 3.13 on the server side (for pycrdt binary wheels)
 - `jupyter-collaboration` + `httpx-ws` installed in the server's venv
