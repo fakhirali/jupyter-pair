@@ -76,7 +76,10 @@ export function parseNotebookPath(value) {
 }
 
 const PATH_KEYS = ["filePath", "path"]
-const NOTEBOOK_HINT = " For .ipynb notebooks, append :N to the file path to target zero-based cell N (e.g. demo.ipynb:5). Reading a .ipynb without :N returns the whole notebook; writing or editing one requires :N."
+const NOTEBOOK_HINT = " For .ipynb notebooks: read the bare path for the whole-notebook projection — cell numbers are the (N) in its `# %% [N] type` headers. Editing a notebook's raw JSON on disk is the wrong move: `write`/`edit` REQUIRE the `:N` suffix (e.g. demo.ipynb:5, zero-based) and a fresh read of that cell; `jupyter.add_cell`/`run_cell`/`delete_cell` take a separate `index` argument instead of `:N`."
+
+const PROJECTION_HINT = (notebook, count) =>
+  `${count} cells. Cell numbers are the (N) in the \`# %% [N] type\` headers; address a cell as ${path.basename(notebook)}:N (zero-based) with read/edit/write, and pass jupyter.add_cell/run_cell/delete_cell a separate index argument. Never patch the raw JSON file on disk.`
 const SUFFIX_HINT = "Pass the notebook path and index separately, e.g. path: \"demo.ipynb\", index: 5 (zero-based), instead of a `:5` suffix."
 
 function notebookSelector(input) {
@@ -87,8 +90,9 @@ function notebookSelector(input) {
   return null
 }
 
-function fileEnvelope(notebook, kind, body) {
-  return `<path>${notebook}</path>\n<type>${kind}</type>\n<content>\n${body}\n</content>`
+function fileEnvelope(notebook, kind, body, cellsNote) {
+  const cells = cellsNote ? `<cells>${cellsNote}</cells>\n` : ""
+  return `<path>${notebook}</path>\n<type>${kind}</type>\n${cells}<content>\n${body}\n</content>`
 }
 
 function paginate(text, offset, limit) {
@@ -141,7 +145,9 @@ export default {
       if (!result.ok) return fileOutput(notebook, result.error, "text/plain")
       if (selector.index === null) {
         remember(context.sessionID, notebook, result.cells)
-        return fileOutput(notebook, fileEnvelope(notebook, "file", paginate(result.text, input.offset, input.limit)),
+        return fileOutput(notebook,
+          fileEnvelope(notebook, "file", paginate(result.text, input.offset, input.limit),
+            PROJECTION_HINT(notebook, result.cells.length)),
           "application/x-ipynb+json")
       }
       const key = cacheKey(context.sessionID, notebook)
@@ -149,7 +155,8 @@ export default {
       entry.cells.set(selector.index, result.cell)
       viewed.set(key, entry)
       return fileOutput(notebook,
-        fileEnvelope(notebook, "notebook-cell", `${result.cell.source || ""}${outputsText(result.cell.outputs)}`),
+        fileEnvelope(notebook, "notebook-cell", `${result.cell.source || ""}${outputsText(result.cell.outputs)}`,
+          `This projection shows cell ${selector.index} of ${path.basename(notebook)}; to mutate or run it, address ${path.basename(notebook)}:${selector.index} (read/edit/write) or pass index: ${selector.index} (jupyter.* tools).`),
         "text/plain")
     }
 

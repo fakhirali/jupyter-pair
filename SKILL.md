@@ -37,13 +37,14 @@ with you. You are a collaborator, not the owner.
 Memorize these before your first tool call. Each one exists because the
 underlying tool *requires* it and will refuse otherwise.
 
-1. **Never grep, glob, or raw-read the *raw JSON* form of a `.ipynb`** — and you
-   never need to: the plugin's `grep` tool already searches notebooks through
-   the live projection and reports hits as `Line N (cell C, cell-line K)`, where
-   `C` is the cell index every tool expects and `N` works as `read(path,
-   offset: N)` for follow-up paging. Grep a notebook exactly like any file
-   (`pattern: "knapsack", path: "nb.ipynb"`); don't manually scan long
-   projections across turns when a fresh grep will do.
+1. **The first call for any notebook work is `read NOTEBOOK.ipynb`.** Every
+   projection output announces the addressing scheme: the `<cells>` banner says
+   cell numbers are the `(N)` in the `# %% [N] type` headers, and that the
+   address is `NOTEBOOK.ipynb:N`. **Never patch a `.ipynb`'s raw JSON on disk**
+   (the on-disk form is JSON with exploded `"source": [...]` arrays — the
+   plugin's `read`/`grep` already search through the live projection, whose
+   grep hits report `Line N (cell C, cell-line K)`); hand-editing the file
+   while a JupyterLab tab is open clobbers the user's work.
 2. **Path grammar differs per tool — this is the #1 refusal:**
    - `read`, `edit`, `write` take the suffix grammar: `NOTEBOOK.ipynb` reads the
      whole notebook; `NOTEBOOK.ipynb:N` targets cell N (zero-based).
@@ -65,9 +66,10 @@ underlying tool *requires* it and will refuse otherwise.
    attached; tell the user to attach one (or open the notebook) and retry.
 6. **The `read` you get back is the authoritative projection**, not the JSON
    file. Code appears as plain lines (markdown prefixed with `#`), outputs as
-   `#| →` (stdout), `#| =` (result), `#| ERR` (error) comment lines, and cell
-   boundaries as `# %% [i] code|markdown` lines. The `i` there is the exact
-   index every tool expects.
+   `#| →` (stdout), `#| =` (result), `#| ERR` (error) comment lines, cell
+   boundaries as `# %% [i] code|markdown` lines — the `i` there is the exact
+   index every tool expects, and each whole-notebook read carries a `<cells>`
+   banner stating the addressing scheme.
 
 ## Steps
 
