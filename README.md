@@ -10,67 +10,81 @@ jupyter-pair instead joins the notebook's real-time collaboration room as a CRDT
 
 ## Features
 
-- **Live cell editing** — `add`, `insert at any index`, `edit`, `delete`, `list`, `read`
+- **Live cell editing** — `add`, `insert at any index`, `edit`, `delete`, `read`
 - **Run cells** — executes through your kernel and writes outputs into the shared document so they render in your tab
-- **Introspection** — `exec` runs arbitrary code in the kernel for state debugging (`%whos`, probing objects) without touching any cell
-- **Edited-since-viewed guard** — cells carry an invisible stamp in their metadata; the agent cannot `edit` or `run` a cell you changed since it last viewed it — the script refuses and tells it to `read` the cell first
+- **Notebook-aware native tools** — `read`, `write`, `edit`, and `grep` understand `.ipynb` paths: `demo.ipynb:N` targets cell N, and grep hits report the cell index directly
+- **Edited-since-viewed guard** — the agent cannot mutate or run a cell whose content changed since it last viewed it; it must re-read first, so it never clobbers your keystrokes
 - **Zero hardcoding** — discovers the running server, port, and auth token from Jupyter's runtime files; re-execs itself with the server's Python if needed
 
 ## Install
 
-With the [skills CLI](https://github.com/vercel/skills):
+The plugin needs a **clone of this repo** (it spawns the bundled
+`scripts/jupyter_cells.py` bridge); the skill can come from that same clone.
+Do all of the following:
 
 ```bash
-npx skills add fakhirali/jupyter-pair
+# 1. Clone the repo (both the skill and the plugin live here)
+git clone https://github.com/fakhirali/jupyter-pair
 ```
 
-Or manually:
+**a. Jupyter environment (once per machine that runs `jupyter-lab`)** — install
+the collaboration stack into the same virtual environment that runs
+`jupyter-lab`, then restart JupyterLab:
 
 ```bash
-git clone https://github.com/fakhirali/jupyter-pair ~/.agents/skills/jupyter-pair
+uv pip install --python <server-python> jupyter-collaboration httpx-ws jupyter-client
 ```
 
-## Setup (once per venv)
+`jupyter-collaboration` provides the JupyterLab extension and server-side
+Yjs/CRDT support; `httpx-ws` and `jupyter-client` are used by the bridge for
+live edits and kernel execution. (Alternatively, install the skill alone with
+the [skills CLI](https://github.com/vercel/skills) via
+`npx skills add fakhirali/jupyter-pair` — but note that route copies the skill
+instructions only and cannot provide the plugin.)
 
-The skill requires real-time collaboration on the Jupyter server. Install into the venv that runs `jupyter-lab`, then restart it:
+**b. OpenCode plugin** — add the clone's `opencode-plugin` directory to
+`plugins` in `~/.config/opencode/opencode.json` (preserve any existing
+entries), then restart OpenCode:
+
+```jsonc
+// ~/.config/opencode/opencode.json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugins": [
+    "/absolute/path/to/jupyter-pair/opencode-plugin"
+  ]
+}
+```
+
+**c. Skill** — either add the plugin's repo as a skill (OpenCode reads skills
+from the clone), or copy it:
 
 ```bash
-uv pip install --python <venv-python> jupyter-collaboration httpx-ws
-# restart jupyter-lab
+npx skills add /path/to/jupyter-pair
 ```
 
-The script runs with any Python 3 and finds the server's own interpreter for the CRDT dependencies.
+**d. Verify:**
+
+1. Start `jupyter-lab` in (or as an ancestor of) the directory containing your
+   notebooks — the bridge discovers servers from `~/Library/Jupyter/runtime/`,
+   and the notebook must live under the server's root dir.
+2. Open a notebook in JupyterLab and attach a kernel (`run_cell` requires one).
+3. In OpenCode, `read demo.ipynb` — done when you see the paginated projection
+   with `# %% [i] code|markdown` markers and no server/dependency error.
+4. Try `demo.ipynb:N` edits and `jupyter.run_cell`: cells and outputs update
+   live in your JupyterLab tab.
+
+Smoke-tests: `node --test opencode-plugin/index.test.mjs` (plugin tools and
+path routing) and `pytest tests/` (RPC guards).
 
 ## Usage
 
-The skill's SKILL.md tells the agent what to do; you usually just ask naturally ("add a cell that plots X", "run cell 3", "check what's in the kernel"). Directly, the CLI is:
-
-```bash
-scripts/jupyter_cells.py NOTEBOOK.ipynb ACTION [args]
-```
-
-```text
-list                                show every cell (with *edited*/*new* markers)
-read INDEX                          print a cell's full source (marks it as viewed)
-add  [--type code|markdown] [--index N] [--source S] [--run] [--timeout SEC]
-run  INDEX [--timeout S]            execute the cell, write outputs live
-exec [--source S] [--timeout S]     run code in the kernel, print result — no cell touched
-edit INDEX [--source S]             replace a cell's source (preserves outputs)
-delete INDEX
-```
-
-`--source` takes inline text, `@file`, or `-` (stdin).
-
-### The edited-since-viewed guard
-
-Every cell carries an `agent_seen` stamp in its `metadata`. `edit` and `run` refuse on any cell whose content changed since the agent last viewed it:
-
-```
-$ jupyter_cells.py nb.ipynb edit 0
-cell 0 was edited since it was last viewed — view it first: run `read 0`, then retry
-```
-
-`list` shows `*edited*` (changed since the agent last saw it) and `*new*` (never viewed) markers. This keeps the agent from overwriting your keystrokes.
+Ask naturally: "add a cell that plots X", "run cell 3", "grep the notebook for
+knapsack". The agent uses the plugin tools; cells and outputs appear live in
+your tab. Tool conventions the agent follows: `read` (bare or `:N` path), `edit`/
+`write` (require `:N`), grep (annotates hits with cell indices), and
+`jupyter.add_cell` / `jupyter.run_cell` / `jupyter.delete_cell` (plain path +
+`index` argument).
 
 ## How it works
 
