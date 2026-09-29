@@ -10,9 +10,9 @@ jupyter-pair instead joins the notebook's real-time collaboration room as a CRDT
 
 ## Features
 
-- **Live cell editing** — `add`, `insert at any index`, `edit`, `delete`, `list`, `read`
+- **Live cell editing** — `add`, `insert at any index`, `edit`, `delete`, `read`
 - **Run cells** — executes through your kernel and writes outputs into the shared document so they render in your tab
-- **Introspection** — `exec` runs arbitrary code in the kernel for state debugging (`%whos`, probing objects) without touching any cell
+- **Introspection** — reading the notebook or a single cell is always available; the agent edits only what it has seen
 - **Edited-since-viewed guard** — cells carry an invisible stamp in their metadata; the agent cannot `edit` or `run` a cell you changed since it last viewed it — the script refuses and tells it to `read` the cell first
 - **Zero hardcoding** — discovers the running server, port, and auth token from Jupyter's runtime files; re-execs itself with the server's Python if needed
 
@@ -30,47 +30,56 @@ Or manually:
 git clone https://github.com/fakhirali/jupyter-pair ~/.agents/skills/jupyter-pair
 ```
 
-## Setup (once per venv)
+## Setup (once per Jupyter environment)
 
-The skill requires real-time collaboration on the Jupyter server. Install into the venv that runs `jupyter-lab`, then restart it:
+Install into the same venv that runs `jupyter-lab`, then restart JupyterLab:
 
 ```bash
-uv pip install --python <venv-python> jupyter-collaboration httpx-ws
-# restart jupyter-lab
+uv pip install --python <server-python> jupyter-collaboration httpx-ws jupyter-client
 ```
 
-The script runs with any Python 3 and finds the server's own interpreter for the CRDT dependencies.
+`jupyter-collaboration` installs the JupyterLab collaboration extension and
+server-side Yjs/CRDT support. `httpx-ws` and `jupyter-client` are used by the
+bridge. The script runs with any Python 3 and re-execs with the server's Python
+when needed.
+
+## OpenCode plugin
+
+The OpenCode V2 plugin registers native notebook tools. Building `read` /
+`write` / `edit` are wrapped: a path with a `:N` suffix (`demo.ipynb:5`,
+zero-based) routes `demo.ipynb` paths to the live document — reading returns a
+paginated projection (`# %% [i] type` markers give the cell index), writing or
+editing requires the `:N` suffix and a fresh view of that cell. Three namespaced
+tools cover kernel operations: `jupyter_run_cell` (executes in the kernel and
+returns the outputs), `jupyter_add_cell`, and `jupyter_delete_cell`.
+
+The plugin tracks cell identity and source hash per session and rejects stale
+or shifted indices; guard and other failures throw as tool errors telling you
+to re-read.
+
+Add the plugin directory to `plugins` in `~/.config/opencode/opencode.json`
+(preserve any existing entries), then restart OpenCode:
+
+```jsonc
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugins": ["/absolute/path/to/jupyter-pair/opencode-plugin"]
+}
+```
+
+The plugin requires the repo clone because it invokes the bundled
+`scripts/jupyter_cells.py` (a JSON-over-stdio RPC bridge, plugin-only — there
+is no human CLI). Installing with `npx skills add` copies the skill
+instructions but does not configure or install the plugin.
+
+Smoke-tests: `node --test opencode-plugin/index.test.mjs` (plugin tools and
+path routing) and `pytest tests/` (RPC guards).
 
 ## Usage
 
-The skill's SKILL.md tells the agent what to do; you usually just ask naturally ("add a cell that plots X", "run cell 3", "check what's in the kernel"). Directly, the CLI is:
-
-```bash
-scripts/jupyter_cells.py NOTEBOOK.ipynb ACTION [args]
-```
-
-```text
-list                                show every cell (with *edited*/*new* markers)
-read INDEX                          print a cell's full source (marks it as viewed)
-add  [--type code|markdown] [--index N] [--source S] [--run] [--timeout SEC]
-run  INDEX [--timeout S]            execute the cell, write outputs live
-exec [--source S] [--timeout S]     run code in the kernel, print result — no cell touched
-edit INDEX [--source S]             replace a cell's source (preserves outputs)
-delete INDEX
-```
-
-`--source` takes inline text, `@file`, or `-` (stdin).
-
-### The edited-since-viewed guard
-
-Every cell carries an `agent_seen` stamp in its `metadata`. `edit` and `run` refuse on any cell whose content changed since the agent last viewed it:
-
-```
-$ jupyter_cells.py nb.ipynb edit 0
-cell 0 was edited since it was last viewed — view it first: run `read 0`, then retry
-```
-
-`list` shows `*edited*` (changed since the agent last saw it) and `*new*` (never viewed) markers. This keeps the agent from overwriting your keystrokes.
+Open a notebook in JupyterLab (or at least attach a kernel to it), then ask
+naturally: "add a cell that plots X", "run cell 3", "read the notebook". The
+agent uses the plugin tools; cells and outputs appear live in your tab.
 
 ## How it works
 

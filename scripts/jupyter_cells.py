@@ -1,33 +1,26 @@
 #!/usr/bin/env python3
-"""Edit a live Jupyter notebook cell-by-cell through the Yjs collaboration room.
+"""RPC bridge: edit a live Jupyter notebook cell-by-cell through the Yjs
+collaboration room on behalf of the jupyter-pair OpenCode plugin.
 
 Cells appear immediately in any open JupyterLab tab — no "changed on disk"
 dialog, no reload. Requires jupyter-collaboration on the Jupyter server.
 
-usage: jupyter_cells.py NOTEBOOK.ipynb ACTION [args]
-actions:
-  list [--brief]              near-full dump: every cell's [exec_count], type,
-                              source and outputs, generously truncated ('...').
-                              Views all cells (refreshes the seen-stamps).
-  text                        whole notebook as percent-format text with outputs
-                              as '#| ' comment lines — pipe through grep/sed.
-                              Views all cells (refreshes stamps)
-  read INDEX                  print full source of one cell + outputs (refreshes stamp)
-  add [--type code|markdown] [--index N] [--source TEXT|@file|-] [--run] [--timeout S]
-  run INDEX [--timeout S]       execute the cell in the kernel, write outputs live
-  exec [--source TEXT|@file|-] [--timeout S]
-                                run read-only code in the kernel for state
-                                inspection (prints stdout/result, touches no
-                                cell) — never for side effects, use cells for that
-  edit INDEX [--source TEXT|@file|-]        replaces the cell (code: clears outputs)
-  delete INDEX
-source defaults to '-' (stdin) if stdin is piped, else required.
+Usage (machine only, no human CLI):
+
+    echo '<json-request>' | jupyter_cells.py NOTEBOOK.ipynb rpc
+
+The request is one JSON object read from stdin with an `op` field — snapshot,
+read, add, write, edit, run, delete — carrying optimistic-concurrency fields
+(expected_id/hash/count). The response is a single JSON object on stdout:
+{"ok": true, ...} or {"ok": false, "error": "..."}. Requests are the plugin's
+interface; use the plugin tools, not this script, from a session.
 """
 import asyncio
 import json
 import os
 import subprocess
 import sys
+from urllib.parse import quote
 import urllib.request
 from queue import Empty
 from pathlib import Path
@@ -52,11 +45,12 @@ def all_servers():
 
 
 def find_server(nb_path: Path):
-    """Return (base_url, token, pid) for the running server serving nb_path."""
+    """Return (base_url, token, pid, server_root) for the server serving nb_path."""
     servers = all_servers()
     for info in servers:
         if str(nb_path).startswith(os.path.realpath(info["root_dir"]) + os.sep):
-            return info["url"].rstrip("/"), info["token"], info["pid"]
+            return (info["url"].rstrip("/"), info["token"], info["pid"],
+                    Path(os.path.realpath(info["root_dir"])))
     raise SystemExit(
         f"No running jupyter server serves {nb_path}.\n"
         f"Servers found: {[(s['root_dir'], s['port']) for s in servers]}\n"
@@ -188,7 +182,7 @@ async def run_kernel(base, token, nb_name, code, timeout):
                 kc.wait_for_ready(timeout=15)
             except RuntimeError:
                 print("warning: kernel busy or unresponsive — request queued, "
-                      "will run when the current cell finishes")
+                      "will run when the current cell finishes", file=sys.stderr)
             msg_id = kc.execute(code)
             deadline = time.monotonic() + timeout
             while not done.is_set():
@@ -222,33 +216,6 @@ def trunc(s, n):
     return s[:n] + ("..." if len(s) > n else "")
 
 
-def describe_cell(c):
-    src = "".join(c["source"]) if isinstance(c["source"], list) else c["source"]
-    first = src.strip().splitlines()
-    return f"{c['cell_type']:8} {first[0][:70] if first else ''}"
-
-
-def output_summary(c):
-    """Truncated status of a cell's outputs: errored, result, or stream tail."""
-    outs = c.get("outputs") or []
-    for o in outs:
-        if o.get("output_type") == "error":
-            return f"  ERR {o.get('ename', '')}: {trunc(str(o.get('evalue', '')), 80)}"
-    last = outs[-1] if outs else None
-    if not last:
-        return ""
-    t = last.get("output_type")
-    if t == "stream":
-        lines = last.get("text", "").strip().splitlines()
-        return f"  > {trunc(lines[-1], 70)}" if lines else ""
-    if t == "execute_result":
-        lines = last.get("data", {}).get("text/plain", "").strip().splitlines()
-        return f"  = {trunc(lines[0], 70)}" if lines else ""
-    if t == "display_data":
-        return f"  [{','.join(last.get('data', {}).keys())}]"
-    return f"  [{t}]"
-
-
 STAMP_KEY = "agent_seen"
 GUARD_MSG = ("cell {i} was edited since it was last viewed — view it first: "
              "run `read {i}`, then retry")
@@ -273,78 +240,202 @@ def stamp_cell(ynb, i):
     ynb.ycells[i]["metadata"][STAMP_KEY] = {"hash": cell_hash(ynb.get_cell(i))}
 
 
-def check_view(ynb, i):
-    """Guard: refuse to mutate a cell the agent hasn't freshly viewed."""
-    state, _ = view_state(ynb, i)
-    if state != "fresh":
-        print(GUARD_MSG.format(i=i))
-        return False
-    return True
+def cell_data(ynb, i):
+    cell = ynb.get_cell(i)
+    source = "".join(cell["source"]) if isinstance(cell["source"], list) else cell["source"]
+    outputs = []
+    for output in cell.get("outputs", []):
+        kind = output.get("output_type")
+        if kind == "stream":
+            outputs.append({"output_type": kind, "name": output.get("name", "stdout"),
+                            "text": trunc(output.get("text", ""), 4000)})
+        elif kind in ("execute_result", "display_data"):
+            data = output.get("data", {})
+            outputs.append({"output_type": kind,
+                            "text": trunc(data.get("text/plain", ""), 4000),
+                            "mime_types": list(data)})
+        elif kind == "error":
+            outputs.append({"output_type": kind, "ename": output.get("ename", ""),
+                            "evalue": trunc(output.get("evalue", ""), 500),
+                            "traceback": (output.get("traceback") or [])[-8:]})
+    return {"index": i, "id": cell.get("id"), "cell_type": cell["cell_type"],
+            "source": source, "source_hash": cell_hash(cell),
+            "execution_count": cell.get("execution_count"), "outputs": outputs}
 
 
-def get_source(arg: str | None) -> str:
-    if arg is None or arg == "-":
-        return sys.stdin.read()
-    if arg.startswith("@"):
-        return Path(arg[1:]).read_text()
-    return arg
-
-
-def parse_flags(rest):
-    """Parse an optional leading INDEX plus --type/--index/--source/--run/--timeout flags."""
-    args = {}
-    if rest and not rest[0].startswith("--"):
-        args["index"] = int(rest[0])
-        rest = rest[1:]
-    it = iter(rest)
-    for flag in it:
-        if not flag.startswith("--"):
-            raise SystemExit(f"unexpected argument: {flag}")
-        key = flag[2:].replace("-", "_")
-        if key in ("run", "brief"):
-            args[key] = True
+def render_projection(ynb):
+    """Whole-notebook percent-format projection; outputs as '#| ' comment lines."""
+    lines = []
+    for i in range(len(ynb.ycells)):
+        c = ynb.get_cell(i)
+        src = "".join(c["source"]) if isinstance(c["source"], list) else c["source"]
+        if c["cell_type"] == "markdown":
+            src = "\n".join(f"# {ln}" for ln in src.splitlines())
         else:
-            args[key] = next(it, None)
-    if "index" in args:
-        args["index"] = int(args["index"])
-    if "timeout" in args:
-        args["timeout"] = float(args["timeout"])
-    return args
+            src = trunc(src, 4000)
+        lines += [f"# %% [{i}] {c['cell_type']}", src]
+        for o in c.get("outputs") or []:
+            t = o.get("output_type")
+            if t == "stream":
+                body = trunc(o.get("text", ""), 2000).strip() or "(empty stream)"
+                lines += [f"#| → {ln}" for ln in body.splitlines()]
+            elif t == "execute_result":
+                body = trunc(o.get("data", {}).get("text/plain", ""), 2000).strip()
+                lines += [f"#| = {ln}" for ln in body.splitlines() or ["(empty result)"]]
+            elif t == "error":
+                lines.append(f"#| ERR {o.get('ename')}: {trunc(str(o.get('evalue', '')), 200)}")
+            elif t == "display_data":
+                lines.append(f"#| [display: {','.join(o.get('data', {}).keys())}]")
+        lines.append("")
+    return "\n".join(lines)
 
 
-async def do_run(ynb, args, base, token, nb_name):
+def rpc_response(**result):
+    print(json.dumps({"ok": True, **result}))
+
+
+def rpc_error(message):
+    print(json.dumps({"ok": False, "error": str(message)}))
+
+
+def rpc_target(ynb, request):
+    i = request.get("index")
+    if not isinstance(i, int) or not 0 <= i < len(ynb.ycells):
+        return None, f"Invalid cell index {i!r}; notebook has {len(ynb.ycells)} cells (0..{len(ynb.ycells) - 1})."
+    cell = ynb.get_cell(i)
+    if not request.get("expected_id") or not request.get("expected_hash"):
+        return None, f"Cell {i} has not been read in this session; read it before writing or running."
+    if cell.get("id") != request["expected_id"]:
+        return None, f"Cell {i} moved or was replaced since it was read; read the cell again."
+    if cell_hash(cell) != request["expected_hash"]:
+        return None, f"Cell {i} changed since it was read; read the cell again before retrying."
+    if view_state(ynb, i)[0] != "fresh":
+        return None, GUARD_MSG.format(i=i)
+    return cell, None
+
+
+async def do_run(ynb, request, base, token, nb_name):
     """Run one cell in the kernel and write the outputs into the shared doc."""
-    idx = args["index"]
+    idx = request["index"]
     cell = ynb.get_cell(idx)
     if cell["cell_type"] != "code":
         raise SystemExit(f"cell {idx} is {cell['cell_type']}, only code cells run")
     src = "".join(cell["source"]) if isinstance(cell["source"], list) else cell["source"]
     outputs, exec_count = await run_kernel(base, token, nb_name, src,
-                                           args.get("timeout") or 60)
+                                           request.get("timeout") or 60)
     ynb.set_cell(idx, {**cell, "outputs": outputs, "execution_count": exec_count})
     await asyncio.sleep(2.5)  # flush outputs to the room; server autosaves
-    print(f"ran cell {idx} [{exec_count}]")
-    for o in outputs:
-        t = o.get("output_type")
-        if t == "stream":
-            print("\n--- stream (stdout) ---\n" + trunc(o["text"], 2000))
-        elif t == "execute_result":
-            print("\n--- result ---\n"
-                  + trunc(o.get("data", {}).get("text/plain", ""), 2000))
-        elif t == "error":
-            print(f"\n--- error ---\n{o['ename']}: {o['evalue']}")
-        elif t == "display_data":
-            print(f"\n--- display: {','.join(o.get('data', {}).keys())} ---")
+    return outputs, exec_count
 
 
-async def yedit(nb_path: Path, action, args):
+async def yjson(ynb, request, base, token, nb_name):
+    op = request.get("op")
+    if op == "snapshot":
+        cells = [cell_data(ynb, i) for i in range(len(ynb.ycells))]
+        for i in range(len(ynb.ycells)):
+            stamp_cell(ynb, i)
+        await asyncio.sleep(1)
+        rpc_response(cells=cells, text=render_projection(ynb))
+        return
+    if op == "read":
+        i = request.get("index")
+        if not isinstance(i, int) or not 0 <= i < len(ynb.ycells):
+            rpc_error(f"Invalid cell index {i!r}; notebook has {len(ynb.ycells)} cells.")
+            return
+        stamp_cell(ynb, i)
+        await asyncio.sleep(1)
+        rpc_response(cell=cell_data(ynb, i))
+        return
+
+    if op in ("write", "edit", "run", "delete"):
+        cell, error = rpc_target(ynb, request)
+        if error:
+            rpc_error(error)
+            return
+        i = request["index"]
+        if op == "run":
+            _, execution_count = await do_run(
+                ynb, {"index": i, "timeout": request.get("timeout")},
+                base, token, nb_name)
+            rpc_response(index=i, execution_count=execution_count,
+                         outputs=cell_data(ynb, i)["outputs"])
+            return
+        if op == "delete":
+            ynb.ycells.pop(i)
+        else:
+            source = request.get("source")
+            if op == "edit":
+                old = request.get("old_string")
+                new = request.get("new_string")
+                if not isinstance(old, str) or not old:
+                    rpc_error("edit needs a non-empty old_string")
+                    return
+                count = cell["source"].count(old)
+                replace_all = request.get("replace_all") is True
+                if count == 0 or (count != 1 and not replace_all):
+                    qualifier = "at least once" if replace_all else "exactly once"
+                    rpc_error(f"old_string matched {count} times in cell {i}; it must match {qualifier}")
+                    return
+                source = cell["source"].replace(old, new if isinstance(new, str) else "",
+                                                -1 if replace_all else 1)
+            if not isinstance(source, str):
+                rpc_error(f"{op} needs source text")
+                return
+            updated = {"cell_type": cell["cell_type"], "source": source,
+                       "metadata": cell.get("metadata", {}), "id": cell.get("id")}
+            if cell["cell_type"] == "code":
+                updated["outputs"] = cell.get("outputs", [])
+                updated["execution_count"] = cell.get("execution_count")
+            ynb.set_cell(i, updated)
+            stamp_cell(ynb, i)
+        await asyncio.sleep(2.5)
+        rpc_response(index=i, cell=cell_data(ynb, i) if op != "delete" else None)
+        return
+
+    if op == "add":
+        source = request.get("source", "")
+        cell_type = request.get("cell_type", "code")
+        if cell_type not in ("code", "markdown") or not isinstance(source, str):
+            rpc_error("add needs source text and cell_type 'code' or 'markdown'")
+            return
+        cell = {"cell_type": cell_type, "source": source, "metadata": {}}
+        if cell_type == "code":
+            cell.update(execution_count=None, outputs=[])
+        index = request.get("index")
+        if index is None:
+            ynb.append_cell(cell)
+            index = len(ynb.ycells) - 1
+        elif isinstance(index, int) and 0 <= index <= len(ynb.ycells):
+            if request.get("expected_count") != len(ynb.ycells):
+                rpc_error("Notebook cells shifted since the last view; read the notebook again before inserting.")
+                return
+            before = ynb.get_cell(index - 1).get("id") if index else None
+            after = ynb.get_cell(index).get("id") if index < len(ynb.ycells) else None
+            if before != request.get("before_id") or after != request.get("after_id"):
+                rpc_error("Cells around this insertion point moved; read the notebook again before inserting.")
+                return
+            ynb.ycells.insert(index, ynb.create_ycell(cell))
+        else:
+            rpc_error(f"Invalid insertion index {index!r}; notebook has {len(ynb.ycells)} cells.")
+            return
+        stamp_cell(ynb, index)
+        await asyncio.sleep(2.5)
+        rpc_response(index=index, cell=cell_data(ynb, index))
+        return
+
+    rpc_error(f"Unknown jupyter-pair operation: {op!r}")
+
+
+async def yedit(nb_path: Path, args):
     from httpx_ws import aconnect_ws
     from pycrdt import Doc, Provider
     from pycrdt.websocket.websocket import HttpxWebsocket
     from jupyter_ydoc import ydocs
 
-    base, token, _ = find_server(nb_path)
-    session = http_json("PUT", f"{base}/api/collaboration/session/{nb_path.name}", token,
+    base, token, _, server_root = find_server(nb_path)
+    relative_path = nb_path.relative_to(server_root).as_posix()
+    session_path = quote(relative_path, safe="/")
+    session = http_json("PUT", f"{base}/api/collaboration/session/{session_path}", token,
                         {"format": "json", "type": "notebook"},
                         what=f"Notebook '{nb_path.name}'")
     room_id = f"{session['format']}:{session['type']}:{session['fileId']}"
@@ -362,179 +453,30 @@ async def yedit(nb_path: Path, action, args):
                 await asyncio.sleep(0.25)
                 if len(ynb.ycells) == last and last >= 0:
                     break
-                last = len(ynb.ycells)
-            n_before = len(ynb.ycells)
-
-            if action in ("read", "edit", "run", "delete"):
-                i = args.get("index")
-                if i is None:
-                    raise SystemExit(f"action `{action}` needs a cell index — run "
-                                     "`list` first to see indices")
-                if i < 0 or i >= n_before:
-                    raise SystemExit(
-                        f"cell {i} does not exist — the notebook has {n_before} cells "
-                        f"(indices 0..{n_before - 1}). Run `list` to see current indices; "
-                        "indices shift when cells are inserted or deleted.")
-
-            if action == "text":
-                for i in range(n_before):
-                    c = ynb.get_cell(i)
-                    ct = c["cell_type"]
-                    print(f"# %% [{i}] {ct}")
-                    src = ("".join(c["source"]) if isinstance(c["source"], list)
-                           else c["source"])
-                    if ct == "markdown":
-                        print("\n".join(f"# {ln}" for ln in src.splitlines()))
-                    else:
-                        print(trunc(src, 4000))
-                    outs = c.get("outputs") or []
-                    for o in outs:
-                        t = o.get("output_type")
-                        if t == "stream":
-                            body = trunc(o.get("text", ""), 2000).strip() or "(empty stream)"
-                            print("\n".join(f"#| → {ln}" for ln in body.splitlines()))
-                        elif t == "execute_result":
-                            body = trunc(o.get("data", {}).get("text/plain", ""), 2000).strip()
-                            print("\n".join(f"#| = {ln}" for ln in body.splitlines() or ["(empty result)"]))
-                        elif t == "error":
-                            print(f"#| ERR {o.get('ename')}: {trunc(str(o.get('evalue', '')), 200)}")
-                        elif t == "display_data":
-                            print(f"#| [display: {','.join(o.get('data', {}).keys())}]")
-                    print()
-                for i in range(n_before):  # full view refreshes all stamps
-                    stamp_cell(ynb, i)
-                await asyncio.sleep(1)
-                return
-
-            if action == "list":
-                for i in range(n_before):
-                    c = ynb.get_cell(i)
-                    state, _ = view_state(ynb, i)
-                    mark = {"fresh": "", "edited": "  *edited*", "new": "  *new*"}[state]
-                    first = ("".join(c["source"]) if isinstance(c["source"], list)
-                             else c["source"])
-                    ec = (f"[{str(c.get('execution_count') or '-'):>3}]"
-                          if c["cell_type"] == "code" else "     ")
-                    # full-ish view: whole file, generous truncation
-                    hdr = f"{i:3} {ec} {c['cell_type']:8}{mark}".rstrip()
-                    print(hdr)
-                    src = first if first.strip() else "(empty)"
-                    for ln in trunc(src, 600).splitlines() or ["(empty)"]:
-                        print(f"     | {ln}")
-                    outs = c.get("outputs") or []
-                    for o in outs:
-                        t = o.get("output_type")
-                        if t == "stream":
-                            txt = trunc(o.get("text", ""), 400).strip()
-                            for ln in txt.splitlines() or ["(empty stream)"]:
-                                print(f"     > {ln}")
-                        elif t == "execute_result":
-                            txt = trunc(o.get("data", {}).get("text/plain", ""), 400).strip()
-                            for ln in txt.splitlines() or ["(empty result)"]:
-                                print(f"     = {ln}")
-                        elif t == "error":
-                            tb = o.get("traceback") or []
-                            print(f"     ERR {o.get('ename')}: {o.get('evalue')}")
-                            for ln in tb[-6:]:
-                                print(f"     ERR {ln}")
-                        elif t == "display_data":
-                            print(f"     [display: {','.join(o.get('data', {}).keys())}]")
-                for i in range(n_before):  # a full view refreshes all stamps
-                    stamp_cell(ynb, i)
-                await asyncio.sleep(1)
-                return
-
-            if action == "read":
-                c = ynb.get_cell(args["index"])
-                print("".join(c["source"]) if isinstance(c["source"], list) else c["source"])
-                for o in c.get("outputs") or []:
-                    t = o.get("output_type")
-                    if t == "stream":
-                        print("\n--- stream (stdout) ---\n" + trunc(o["text"], 2000))
-                    elif t == "execute_result":
-                        print("\n--- result ---\n"
-                              + trunc(o.get("data", {}).get("text/plain", ""), 2000))
-                    elif t == "error":
-                        print(f"\n--- error ---\n{o['ename']}: {o['evalue']}")
-                    elif t == "display_data":
-                        print(f"\n--- display: {','.join(o.get('data', {}).keys())} ---")
-                stamp_cell(ynb, args["index"])  # viewing refreshes the stamp
-                await asyncio.sleep(1)
-                return
-
-            if action == "add":
-                src = get_source(args.get("source"))
-                cell = {"cell_type": args.get("type", "code"), "source": src, "metadata": {}}
-                if cell["cell_type"] == "code":
-                    cell["execution_count"] = None
-                    cell["outputs"] = []
-                if args.get("index") is None:
-                    ynb.append_cell(cell)
-                    idx = len(ynb.ycells) - 1
-                else:
-                    idx = args["index"]
-                    ynb.ycells.insert(idx, ynb.create_ycell(cell))
-                stamp_cell(ynb, idx)  # agent authored it; fresh view
-            elif action == "run":
-                if not check_view(ynb, args["index"]):
-                    return
-                await do_run(ynb, args, base, token, nb_path.name)
-                return
-            elif action == "exec":
-                src = get_source(args.get("source"))
-                outputs, ec = await run_kernel(base, token, nb_path.name, src,
-                                               args.get("timeout") or 60)
-                for o in outputs:
-                    if o["output_type"] == "stream":
-                        print(o["text"], end="")
-                    elif o["output_type"] == "execute_result" and "text/plain" in o["data"]:
-                        print(o["data"]["text/plain"], end="")
-                    elif o["output_type"] == "error":
-                        print(f"{o['ename']}: {o['evalue']}")
-                return
-            elif action == "edit":
-                if not check_view(ynb, args["index"]):
-                    return
-                old = ynb.get_cell(args["index"])
-                cell = {"cell_type": old["cell_type"], "source": get_source(args.get("source")),
-                        "metadata": old.get("metadata", {})}
-                if old["cell_type"] == "code":  # preserve outputs across edits
-                    cell["outputs"] = old.get("outputs", [])
-                    cell["execution_count"] = old.get("execution_count")
-                ynb.set_cell(args["index"], cell)
-                stamp_cell(ynb, args["index"])
-            elif action == "delete":
-                ynb.ycells.pop(args["index"])
-            else:
-                raise SystemExit(f"unknown action {action!r}")
-
-            await asyncio.sleep(2.5)  # flush CRDT updates; server autosaves
-            print(f"live doc: {n_before} -> {len(ynb.ycells)} cells")
-
-            if args.get("run") and action == "add":
-                idx = len(ynb.ycells) - 1 if args.get("index") is None else args["index"]
-                await do_run(ynb, {"index": idx, "timeout": args.get("timeout")},
-                             base, token, nb_path.name)
+            await yjson(ynb, args, base, token, nb_path.name)
 
 
 def main():
     argv = sys.argv[1:]
-    if len(argv) < 2 or argv[1] in ("-h", "--help"):
+    if len(argv) != 2 or argv[1] == "-h" or argv[1] == "--help":
         raise SystemExit(USAGE)
     nb_path = Path(argv[0]).expanduser().resolve()
     if not nb_path.exists():
         suggest_notebook(nb_path)
-    action, rest = argv[1], argv[2:]
-
-    base, token, pid = find_server(nb_path)
-    ensure_deps(pid)
-
-    args = parse_flags(rest)
 
     try:
-        asyncio.run(yedit(nb_path, action, args))
-    except SystemExit:
-        raise
+        base, token, pid, _ = find_server(nb_path)
+        ensure_deps(pid)
+        args = json.load(sys.stdin)
+    except (json.JSONDecodeError, SystemExit) as e:
+        rpc_error(getattr(e, "code", None) or f"invalid RPC request: {e}")
+        sys.exit(1)
+
+    try:
+        asyncio.run(yedit(nb_path, args))
+    except SystemExit as e:
+        rpc_error(e.code or "request failed")
+        sys.exit(1)
     except BaseExceptionGroup as eg:
         # anyio wraps errors raised inside the CRDT task group; surface the
         # descriptive message instead of a wall of traceback
@@ -546,8 +488,7 @@ def main():
                     yield exc
         exits = [e for e in leaves(eg) if isinstance(e, SystemExit)]
         if exits:
-            if exits[0].code:
-                print(exits[0].code, file=sys.stderr)
+            rpc_error(exits[0].code or "request failed")
             sys.exit(1)
         raise
 
