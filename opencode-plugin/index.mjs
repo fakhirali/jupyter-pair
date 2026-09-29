@@ -202,6 +202,15 @@ export default {
       const result = await bridge(notebook, request, await directoryFor(context.sessionID), context.signal)
       if (!result.ok) throw new Error(result.error)
       view(context.sessionID, notebook)?.cells.set(selector.index, result.cell)
+      // Each native tool validates its own output schema:
+      //   edit → { files: FileDiff[], replacements: number }
+      //   write → { operation: "write", target, resource, existed }
+      if (operation === "write") {
+        return {
+          output: { operation: "write", target: notebook, resource: `${notebook}:${selector.index}`, existed: true },
+          content: `Updated ${notebook}:${selector.index} live.`,
+        }
+      }
       return {
         output: {
           files: [{ file: `${notebook}:${selector.index}`, patch: "", additions: 1, deletions: 1, status: "modified" }],

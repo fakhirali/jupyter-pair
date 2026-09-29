@@ -453,6 +453,7 @@ async def yedit(nb_path: Path, args):
                 await asyncio.sleep(0.25)
                 if len(ynb.ycells) == last and last >= 0:
                     break
+                last = len(ynb.ycells)
             await yjson(ynb, args, base, token, nb_path.name)
 
 
