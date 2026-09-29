@@ -12,74 +12,79 @@ jupyter-pair instead joins the notebook's real-time collaboration room as a CRDT
 
 - **Live cell editing** — `add`, `insert at any index`, `edit`, `delete`, `read`
 - **Run cells** — executes through your kernel and writes outputs into the shared document so they render in your tab
-- **Introspection** — reading the notebook or a single cell is always available; the agent edits only what it has seen
-- **Edited-since-viewed guard** — cells carry an invisible stamp in their metadata; the agent cannot `edit` or `run` a cell you changed since it last viewed it — the script refuses and tells it to `read` the cell first
+- **Notebook-aware native tools** — `read`, `write`, `edit`, and `grep` understand `.ipynb` paths: `demo.ipynb:N` targets cell N, and grep hits report the cell index directly
+- **Edited-since-viewed guard** — the agent cannot mutate or run a cell whose content changed since it last viewed it; it must re-read first, so it never clobbers your keystrokes
 - **Zero hardcoding** — discovers the running server, port, and auth token from Jupyter's runtime files; re-execs itself with the server's Python if needed
 
 ## Install
 
-With the [skills CLI](https://github.com/vercel/skills):
+The plugin needs a **clone of this repo** (it spawns the bundled
+`scripts/jupyter_cells.py` bridge); the skill can come from that same clone.
+Do all of the following:
 
 ```bash
-npx skills add fakhirali/jupyter-pair
+# 1. Clone the repo (both the skill and the plugin live here)
+git clone https://github.com/fakhirali/jupyter-pair
 ```
 
-Or manually:
-
-```bash
-git clone https://github.com/fakhirali/jupyter-pair ~/.agents/skills/jupyter-pair
-```
-
-## Setup (once per Jupyter environment)
-
-Install into the same venv that runs `jupyter-lab`, then restart JupyterLab:
+**a. Jupyter environment (once per machine that runs `jupyter-lab`)** — install
+the collaboration stack into the same virtual environment that runs
+`jupyter-lab`, then restart JupyterLab:
 
 ```bash
 uv pip install --python <server-python> jupyter-collaboration httpx-ws jupyter-client
 ```
 
-`jupyter-collaboration` installs the JupyterLab collaboration extension and
-server-side Yjs/CRDT support. `httpx-ws` and `jupyter-client` are used by the
-bridge. The script runs with any Python 3 and re-execs with the server's Python
-when needed.
+`jupyter-collaboration` provides the JupyterLab extension and server-side
+Yjs/CRDT support; `httpx-ws` and `jupyter-client` are used by the bridge for
+live edits and kernel execution. (Alternatively, install the skill alone with
+the [skills CLI](https://github.com/vercel/skills) via
+`npx skills add fakhirali/jupyter-pair` — but note that route copies the skill
+instructions only and cannot provide the plugin.)
 
-## OpenCode plugin
-
-The OpenCode V2 plugin registers native notebook tools. Building `read` /
-`write` / `edit` are wrapped: a path with a `:N` suffix (`demo.ipynb:5`,
-zero-based) routes `demo.ipynb` paths to the live document — reading returns a
-paginated projection (`# %% [i] type` markers give the cell index), writing or
-editing requires the `:N` suffix and a fresh view of that cell. Three namespaced
-tools cover kernel operations: `jupyter_run_cell` (executes in the kernel and
-returns the outputs), `jupyter_add_cell`, and `jupyter_delete_cell`.
-
-The plugin tracks cell identity and source hash per session and rejects stale
-or shifted indices; guard and other failures throw as tool errors telling you
-to re-read.
-
-Add the plugin directory to `plugins` in `~/.config/opencode/opencode.json`
-(preserve any existing entries), then restart OpenCode:
+**b. OpenCode plugin** — add the clone's `opencode-plugin` directory to
+`plugins` in `~/.config/opencode/opencode.json` (preserve any existing
+entries), then restart OpenCode:
 
 ```jsonc
+// ~/.config/opencode/opencode.json
 {
   "$schema": "https://opencode.ai/config.json",
-  "plugins": ["/absolute/path/to/jupyter-pair/opencode-plugin"]
+  "plugins": [
+    "/absolute/path/to/jupyter-pair/opencode-plugin"
+  ]
 }
 ```
 
-The plugin requires the repo clone because it invokes the bundled
-`scripts/jupyter_cells.py` (a JSON-over-stdio RPC bridge, plugin-only — there
-is no human CLI). Installing with `npx skills add` copies the skill
-instructions but does not configure or install the plugin.
+**c. Skill** — either add the plugin's repo as a skill (OpenCode reads skills
+from the clone), or copy it:
+
+```bash
+npx skills add /path/to/jupyter-pair
+```
+
+**d. Verify:**
+
+1. Start `jupyter-lab` in (or as an ancestor of) the directory containing your
+   notebooks — the bridge discovers servers from `~/Library/Jupyter/runtime/`,
+   and the notebook must live under the server's root dir.
+2. Open a notebook in JupyterLab and attach a kernel (`run_cell` requires one).
+3. In OpenCode, `read demo.ipynb` — done when you see the paginated projection
+   with `# %% [i] code|markdown` markers and no server/dependency error.
+4. Try `demo.ipynb:N` edits and `jupyter.run_cell`: cells and outputs update
+   live in your JupyterLab tab.
 
 Smoke-tests: `node --test opencode-plugin/index.test.mjs` (plugin tools and
 path routing) and `pytest tests/` (RPC guards).
 
 ## Usage
 
-Open a notebook in JupyterLab (or at least attach a kernel to it), then ask
-naturally: "add a cell that plots X", "run cell 3", "read the notebook". The
-agent uses the plugin tools; cells and outputs appear live in your tab.
+Ask naturally: "add a cell that plots X", "run cell 3", "grep the notebook for
+knapsack". The agent uses the plugin tools; cells and outputs appear live in
+your tab. Tool conventions the agent follows: `read` (bare or `:N` path), `edit`/
+`write` (require `:N`), grep (annotates hits with cell indices), and
+`jupyter.add_cell` / `jupyter.run_cell` / `jupyter.delete_cell` (plain path +
+`index` argument).
 
 ## How it works
 
