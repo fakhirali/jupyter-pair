@@ -285,8 +285,121 @@ export default {
       }
     }
 
+    // Grep over the notebook projection instead of the raw JSON. Match
+    // FileSystem.Match: { entry: { path, type }, line, offset, text,
+    // submatches: [{ text, start, end }] }. Line numbers are 1-based lines of
+    // the whole-notebook read projection, so they work directly as a
+    // follow-up read(offset: line, limit) and each hit's nearest `# %% [i]`
+    // marker above it is the cell index to target.
+    async function grepNotebookOutput(selector, input, context) {
+      if (typeof input.pattern !== "string" || input.pattern.length === 0) {
+        throw new Error("Pattern must not be empty")
+      }
+      const notebook = await resolveNotebook(selector.notebook, context.sessionID)
+      const result = await bridge(notebook, { op: "snapshot" },
+        await directoryFor(context.sessionID), context.signal)
+      if (!result.ok) throw new Error(result.error)
+      remember(context.sessionID, notebook, result.cells)
+
+      const lines = result.text.split("\n")
+      // Region boundaries: cell i spans [startLine0, endLine0) in 0-based lines
+      const cells = []
+      let current = null
+      for (let i = 0; i < lines.length; i++) {
+        const m = lines[i].match(/^# %% \[(\d+)\] (code|markdown)$/)
+        if (m) {
+          if (current) current.endLine0 = i
+          current = { index: Number(m[1]), type: m[2], startLine0: i }
+          cells.push(current)
+        }
+      }
+      if (current) current.endLine0 = lines.length
+      if (cells.length === 0) throw new Error("Projection contained no cell markers; cannot address results.")
+
+      // include filter on cell language: *.py → code cells, *.md → markdown,
+      // anything else (or missing) → all cells
+      let typeFilter = null
+      if (typeof input.include === "string") {
+        const inc = input.include.toLowerCase()
+        if (/\.py\b|\.py$/.test(inc) || /\*.py/.test(inc)) typeFilter = "code"
+        else if (/\.md\b|\.md$|markdown/.test(inc)) typeFilter = "markdown"
+        else if (/ipynb/.test(inc)) typeFilter = null
+        else return { output: [] }
+      }
+      const index = selector.index
+      if (index !== null) {
+        const region = cells.find((c) => c.index === index)
+        if (!region) throw new Error(`Cell ${index} not found in ${notebook}; the notebook may have changed — read it again.`)
+        if (typeFilter && region.type !== typeFilter) return { output: [] }
+      }
+
+      let re
+      try {
+        const source = (input.literal === true)
+          ? input.pattern.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+          : input.pattern
+        re = new RegExp(source, input.caseSensitive === false ? "gimu" : "gmu")
+      } catch (error) {
+        throw new Error(`Invalid regex pattern: ${error.message}`)
+      }
+      const limit = typeof input.limit === "number" && input.limit > 0 ? Math.floor(input.limit) : 100
+
+      const matches = []
+      let offset = 0
+      let truncated = false
+      for (let i = 0; i < lines.length && !truncated; i++) {
+        const lineText = lines[i]
+        const lineNextOffset = offset + lineText.length + 1
+        if (lineText.length && (index === null || inCellOf(cells, index, i, typeFilter))) {
+          re.lastIndex = 0
+          let m
+          while ((m = re.exec(lineText)) !== null) {
+            const cell = cells.find((c) => i >= c.startLine0 && i < c.endLine0)
+            const cellLine = cell ? i - cell.startLine0 : 0 // marker line itself is line 0's neighborhood ref
+            matches.push({
+              entry: { path: notebook, type: "file" },
+              line: i + 1,
+              offset,
+              text: lineText,
+              submatches: [{ text: m[0], start: m.index, end: m.index + m[0].length }],
+              cell: cell ? cell.index : null,
+              cellLine,
+            })
+            if (matches.length > limit) { truncated = true; break }
+          }
+        }
+        offset = lineNextOffset
+      }
+
+      const shown = matches.slice(0, limit)
+      const parts = shown.length === 0 ? ["No matches found"] : [`Found ${shown.length} matches in ${notebook}`]
+      let lastCell = null
+      for (const hit of shown) {
+        if (hit.cell !== lastCell) {
+          lastCell = hit.cell
+          parts.push(`cell ${lastCell}:`)
+        }
+        parts.push(`  Line ${hit.line} (cell ${lastCell}, cell-line ${hit.cellLine}): ${hit.text}`)
+      }
+      if (truncated) {
+        parts.push("", `(Showing first ${shown.length}. Use a more specific pattern or raise limit; line numbers work with read(offset:).)`)
+      }
+      return {
+        output: shown.map(({ cell, cellLine, ...rest }) => rest),
+        content: parts.join("\n"),
+        metadata: { matches: shown.length, truncated },
+      }
+    }
+
+    function inCellOf(cells, notebookIndex, line0, typeFilter) {
+      const cell = cells.find((c) => line0 >= c.startLine0 && line0 < c.endLine0)
+      if (!cell) return false
+      return !(typeFilter && cell.type !== typeFilter)
+    }
+
     const pathSchema = { type: "string", description: "Path to the .ipynb notebook, absolute or relative to the session directory" }
     const indexSchema = { type: "integer", minimum: 0, description: "Zero-based notebook cell index" }
+    const NOTEBOOK_GREP_HINT = " For .ipynb notebooks, this searches the live cell projection instead of raw JSON: hits report `Line N (cell C, cell-line K)`, where C is the cell index to target with edit/run and N matches `read(path, offset: N)` pagination."
 
     await ctx.tool.transform((editor) => {
       const originals = new Map(editor.list().map((tool) => [tool.id, tool.execute]))
@@ -300,6 +413,18 @@ export default {
             if (!selector) return original(input, context)
             if (name === "read") return await readNotebookOutput(selector, input, context)
             return await mutateNotebookOutput(selector, name, input, context)
+          }
+        })
+      }
+      const grepOriginal = originals.get("grep")
+      const grepTool = editor.get("grep")
+      if (typeof grepOriginal === "function" && grepTool) {
+        editor.update("grep", (tool) => {
+          tool.description += NOTEBOOK_GREP_HINT
+          tool.execute = async (input, context) => {
+            const selector = notebookSelector(input)
+            if (!selector) return grepOriginal(input, context)
+            return await grepNotebookOutput(selector, input, context)
           }
         })
       }

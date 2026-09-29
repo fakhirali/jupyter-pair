@@ -1,11 +1,97 @@
 ---
 name: jupyter-pair
-description: Edit and run cells in a running JupyterLab notebook so they appear live in the open tab — no "changed on disk" dialog, no reload. Use when the user asks to add, insert, edit, replace, remove, or delete cells in a .ipynb, to run a cell and have its outputs appear in the notebook, or to list or read a notebook's cells, and a Jupyter server is running.
+description: Edit and run cells in a running JupyterLab notebook so they appear live in the open tab — no "changed on disk" dialog, no reload. Use when the user asks to add, insert, edit, replace, remove, or delete cells in a .ipynb, to run a cell and have its outputs appear in the notebook, or to read a notebook's cells, and a Jupyter server is running.
 ---
 
 # Jupyter cells
 
-Edit a notebook through its live CRDT collaboration room, not the file on disk. Cells appear instantly in any open JupyterLab tab — the user's unsaved edits are part of the same shared document, so nothing is overwritten — and the server autosaves to disk. Writing the `.ipynb` file directly is the dialog path; the tools are the live path.
+Edit a notebook through its live CRDT collaboration room, not the file on disk.
+Cells appear instantly in any open JupyterLab tab — the user's unsaved edits are
+part of the same shared document, so nothing is overwritten — and the server
+autosaves to disk. Writing the `.ipynb` file directly is the dialog path; the
+tools are the live path.
+
+## Rules that prevent the common errors
+
+Memorize these before your first tool call. Each one exists because the
+underlying tool *requires* it and will refuse otherwise.
+
+1. **Never grep, glob, or raw-read the *raw JSON* form of a `.ipynb`** — and you
+   never need to: the plugin's `grep` tool already searches notebooks through
+   the live projection and reports hits as `Line N (cell C, cell-line K)`, where
+   `C` is the cell index every tool expects and `N` works as `read(path,
+   offset: N)` for follow-up paging. Grep a notebook exactly like any file
+   (`pattern: "knapsack", path: "nb.ipynb"`); don't manually scan long
+   projections across turns when a fresh grep will do.
+2. **Path grammar differs per tool — this is the #1 refusal:**
+   - `read`, `edit`, `write` take the suffix grammar: `NOTEBOOK.ipynb` reads the
+     whole notebook; `NOTEBOOK.ipynb:N` targets cell N (zero-based).
+     `edit`/`write` **require** the `:N` suffix — a bare path is rejected with
+     "Add :N to the notebook path…".
+   - `jupyter.add_cell`, `jupyter.run_cell`, `jupyter.delete_cell` take the
+     notebook path **without any `:N`** and pass the cell index as the separate
+     `index` argument. A `:N` suffix on their path is rejected with "Pass the
+     notebook path and index separately…".
+3. **A cell must be read in this session before you mutate or run it.** Read the
+   whole notebook first, then work. After any add or delete, later indices
+   shift — re-read before touching anything at a higher index.
+4. **Do not carry cell indices across turns from memory or stale attachments.**
+   If the user may have edited since you last read, re-read.
+5. **Running a cell needs a kernel.** If you get "No kernel session for
+   X.ipynb — open the notebook first", the notebook is open but has no kernel
+   attached; tell the user to attach one (or open the notebook) and retry.
+6. **The `read` you get back is the authoritative projection**, not the JSON
+   file. Code appears as plain lines (markdown prefixed with `#`), outputs as
+   `#| →` (stdout), `#| =` (result), `#| ERR` (error) comment lines, and cell
+   boundaries as `# %% [i] code|markdown` lines. The `i` there is the exact
+   index every tool expects.
+
+## Steps
+
+1. **Locate content.** `grep` the notebook (`path: "NOTEBOOK.ipynb"`) — hits are
+   annotated `Line N (cell C, cell-line K)`: `C` is the cell index to target,
+   `N` continues into the projection via `read(path, offset: N)`. Without a
+   search term (or to see everything at once), `read NOTEBOOK.ipynb` for the
+   paginated projection with `# %% [i]` markers.
+   Done when: you know the target cell index and have fresh cell text.
+
+2. **Mutate with the right tool for the job:**
+   - Replace the whole source: `write NOTEBOOK.ipynb:N` (string content) or
+     `read` then `edit NOTEBOOK.ipynb:N` with exact `oldString`/`newString`
+     (copied verbatim from your most recent read — no line-number prefixes).
+   - New cell: `jupyter.add_cell({ path, source, cell_type, index })`. Omitting
+     `index` appends. **To insert at an index you must have read the WHOLE
+     notebook in this session first** (insertion guards verify counts and
+     neighbors). `index` is zero-based, *before* the cell that will end up at
+     that position — e.g. `index: 5` inserts so the new cell becomes cell 5.
+   - Run: `jupyter.run_cell({ path, index, timeout })` — returns the outputs
+     (stdout/result/error) and writes them into the shared cell.
+   - Remove: `jupyter.delete_cell({ path, index })` after reading that cell.
+   Done when: the tool confirms (`Updated … live.`, `Added … cell N live.`,
+   `ran cell N [exec_count]`, `Deleted cell N live.`).
+
+3. **Verify after structural changes.** `read` the notebook again after any
+   add or delete — both to confirm to the user and to refresh your index
+   knowledge for follow-up work.
+
+4. **Tell the user to look.** The cells are already on screen if their tab is
+   open; no prompt will appear.
+
+## Guard messages — lookup table
+
+Every refusal tells you the cure. Follow it exactly; never retry the same call.
+
+| Message | What it means | Action |
+|---|---|---|
+| `Add :N to the notebook path to target a cell…` | You called `edit`/`write` with a bare `.ipynb` path | Append `:CELL` to the path and retry |
+| `Pass the notebook path and index separately…` | You gave `:N` on the path to `add_cell`/`run_cell`/`delete_cell` | Move the number into the `index` argument |
+| `Read cell N first…` / `…read it before writing or running` | That cell wasn't viewed in this session | `read NOTEBOOK.ipynb:N`, then retry |
+| `Cell N changed since it was read; read the cell again…` | The user (or you) edited after your snapshot | `read NOTEBOOK.ipynb:N` again, retry with fresh text |
+| `Cell N moved or was replaced…` | Cells were inserted/deleted; your index now points elsewhere | `read` the whole notebook, re-derive the index |
+| `Notebook cells shifted… read the notebook again before inserting` | `add_cell` with `index` after a stale view | `read` whole notebook, retry |
+| `old_string matched 0 times` / `matched N times` | `oldString` not verbatim or not unique | `read NOTEBOOK.ipynb:N`, copy the exact text, retry (or set `replaceAll`) |
+| `No kernel session for X.ipynb — open the notebook first` | Notebook file exists but no kernel is attached | Ask the user to open it / attach a kernel; then retry |
+| `Invalid insertion index N…` | Index out of range | `read` the notebook to see the real cell count |
 
 ## Prerequisites (one-time)
 
@@ -21,45 +107,6 @@ Edit a notebook through its live CRDT collaboration room, not the file on disk. 
    `"plugins": ["/absolute/path/to/jupyter-pair/opencode-plugin"]`.
    Installing with `npx skills add` installs this skill, not the OpenCode plugin.
 4. Verify by reading a notebook served by that JupyterLab with the `read` tool.
-   Done when its cells print without a server/dependency error.
-
-## Steps
-
-1. **Inspect first.** Reading the notebook views it and refreshes all
-   viewed-stamps, which unlocks `edit`/`run`/`delete` on every cell:
-   - whole notebook: `read NOTEBOOK.ipynb` (paginated `# %% [i] type` markers
-     give the zero-based cell index to target)
-   - one cell: `read NOTEBOOK.ipynb:N`
-   Done when: the dump prints cell types, sources, and outputs with no
-   server/dependency error.
-
-2. **Mutate.** Use `edit`/`write` with the `NOTEBOOK.ipynb:N` path shorthand,
-   or `jupyter.add_cell` / `jupyter.run_cell` / `jupyter.delete_cell` with
-   `path` + zero-based `index`. Read a cell (or the notebook) before touching it —
-   the tools refuse stale views.
-   Done when: the tool confirms (`Updated ... live.`, `Added ... cell ... live.`
-   — or `ran cell N [exec_count]` followed by its outputs). Read afterwards to
-   confirm content and outputs.
-
-3. **Tell the user to look.** The cells are already on screen if their tab is
-   open; no prompt will appear.
-
-## Tool reference
-
-- `read` / `write` / `edit` (native tools, wrapped for notebooks): pass a path
-  with an optional `:N` suffix — `demo.ipynb` reads the projection of the whole
-  notebook; `demo.ipynb:5` targets cell 5 (zero-based) for read/edit/write.
-- `jupyter.run_cell({ path, index, timeout? })` — execute in the kernel and
-  return the outputs (`--- stdout ---`, `--- result ---`, `--- error ---`).
-  Outputs are written into the shared CRDT cell so they render in the user's
-  tab too. Long-running cells (e.g. a dev server) hit the default 60s timeout —
-  pass a larger `timeout`, and stop the cell in the UI afterwards.
-- `jupyter.add_cell({ path, source, cell_type?, index? })` — no `index` appends.
-  Read the whole notebook before inserting at an index.
-- `jupyter.delete_cell({ path, index })` — read the cell first.
-
-`run_cell` connects directly to the kernel (jupyter_client), then writes the
-collected outputs into the shared cell.
 
 ## Troubleshooting
 
@@ -67,14 +114,9 @@ collected outputs into the shared cell.
   server's root dir. Start `jupyter-lab` from the workspace root (or its parent).
 - Deps error — the script prints the exact install command; run it and restart
   `jupyter-lab`.
-- `room doc never synced` — the room could not be loaded. Check the notebook is
-  reachable via the server's contents API.
 - No live appearance and a dialog on reload — `jupyter-collaboration` is not
-  installed on the server; you silently fell back to nothing. Never fall back
-  to writing the `.ipynb` by hand while a tab is open: the user's save then
-  clobbers the edit.
-- `No kernel session for …` — the notebook is open on disk but no kernel is
-  attached; ask the user to open it (or attach a kernel) and retry.
+  installed on the server. Never fall back to writing the `.ipynb` by hand
+  while a tab is open: the user's save then clobbers the edit.
 - `warning: kernel busy or unresponsive — request queued` — a cell is occupying
   the kernel (e.g. an input-loop REPL or dev server). One execution queue per
   kernel: nothing external can interleave.
@@ -83,11 +125,10 @@ collected outputs into the shared cell.
 
 ## Edited-since-viewed guards
 
-Every mutation request carries the cell's expected `id` and source **hash**
-(with insertion guards: `expected_count`, `before_id`, `after_id`) from the
-plugin's view cache; the bridge refuses mismatches with a message telling the
-agent to `read` again. So you can never clobber the user's keystrokes made
-since you last looked.
+Every mutation sends the target cell's expected `id` + source **hash** (inserts
+add `expected_count`/`before_id`/`after_id`) from the plugin's view cache; the
+bridge refuses mismatches — that is what makes it safe to work while the user
+types.
 
 ## How it works
 

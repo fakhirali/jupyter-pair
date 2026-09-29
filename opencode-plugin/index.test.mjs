@@ -10,6 +10,13 @@ function makeContext() {
     input: { type: "object", properties: {} },
     execute: async () => ({ output: `${id} original output` }),
   }]))
+  tools.set("grep", {
+    id: "grep",
+    name: "grep",
+    description: "grep original",
+    input: { type: "object", properties: { pattern: { type: "string" }, path: { type: "string" } } },
+    execute: async () => ({ output: [], content: "No matches found" }),
+  })
   const editor = {
     list: () => [...tools.values()],
     get: (id) => tools.get(id),
@@ -46,6 +53,11 @@ test("native tools keep their declared output shape and delegate ordinary files"
 
   const nearMiss = await tools.get("read").execute({ filePath: "demo.ipynb:abc" }, { id: "2", sessionID: "s" })
   assert.equal(nearMiss.output, "read original output")
+
+  const grepDelegated = await tools.get("grep").execute(
+    { pattern: "x", path: "src" }, { id: "6", sessionID: "s" })
+  assert.deepEqual(grepDelegated.output, [])
+  assert.equal(tools.get("grep").description, "grep original For .ipynb notebooks, this searches the live cell projection instead of raw JSON: hits report `Line N (cell C, cell-line K)`, where C is the cell index to target with edit/run and N matches `read(path, offset: N)` pagination.")
 
   await assert.rejects(() => tools.get("write").execute(
     { filePath: "demo.ipynb", content: "x = 1" }, { id: "3", sessionID: "s" }),
