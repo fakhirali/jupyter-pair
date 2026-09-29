@@ -1,6 +1,10 @@
 {
   "name": "jupyter-pair-opencode-plugin",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "type": "module",
-  "exports": "./index.mjs"
+  "exports": "./index.mjs",
+  "files": [
+    "index.mjs",
+    "scripts/jupyter_cells.py"
+  ]
 }

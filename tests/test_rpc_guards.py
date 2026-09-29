@@ -2,7 +2,7 @@ import importlib.util
 import unittest
 from pathlib import Path
 
-SCRIPT = Path(__file__).parents[1] / "scripts/jupyter_cells.py"
+SCRIPT = Path(__file__).parents[1] / "opencode-plugin/scripts/jupyter_cells.py"
 spec = importlib.util.spec_from_file_location("jupyter_cells", SCRIPT)
 jc = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(jc)

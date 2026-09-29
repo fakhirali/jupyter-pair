@@ -22,17 +22,54 @@ jupyter-pair instead joins the notebook's real-time collaboration room as a CRDT
 
 ## Install
 
-The plugin needs a **clone of this repo** (it spawns the bundled
-`scripts/jupyter_cells.py` bridge); the skill can come from that same clone.
-Do all of the following:
+### npm-style (once the package is published)
+
+```sh
+opencode plugin add jupyter-pair-opencode-plugin
+# or pin: opencode plugin add jupyter-pair-opencode-plugin@0.2.0
+```
+
+OpenCode installs the tarball (plugin + bundled Python bridge) and manages it
+from there; unpinned versions auto-update in the background. The skill:
+
+```sh
+npx skills add fakhirali/jupyter-pair
+```
+
+### From a clone (local path, hot-reloadable)
+
+The local path is what you need during development — OpenCode watches it and
+picks up changes:
 
 ```bash
-# 1. Clone the repo (both the skill and the plugin live here)
 git clone https://github.com/fakhirali/jupyter-pair
 ```
 
-**a. Jupyter environment (once per machine that runs `jupyter-lab`)** — install
-the collaboration stack into the same virtual environment that runs
+Then in `~/.config/opencode/opencode.json` (preserve any existing entries):
+
+```jsonc
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugins": ["/absolute/path/to/jupyter-pair/opencode-plugin"]
+}
+```
+
+The plugin tarball/clone is self-contained (bridge at
+`opencode-plugin/scripts/jupyter_cells.py`). Either way, install the skill
+alongside: `npx skills add /path/to/jupyter-pair`.
+
+### Publishing a new npm release
+
+```sh
+cd opencode-plugin && npm publish
+```
+
+`npm pack` produces `jupyter-pair-opencode-plugin-<version>.tgz` containing
+`index.mjs` and `scripts/jupyter_cells.py` only.
+
+### Jupyter environment (once per machine that runs `jupyter-lab`)
+
+Install the collaboration stack into the same virtual environment that runs
 `jupyter-lab`, then restart JupyterLab:
 
 ```bash
@@ -41,40 +78,17 @@ uv pip install --python <server-python> jupyter-collaboration httpx-ws jupyter-c
 
 `jupyter-collaboration` provides the JupyterLab extension and server-side
 Yjs/CRDT support; `httpx-ws` and `jupyter-client` are used by the bridge for
-live edits and kernel execution. (Alternatively, install the skill alone with
-the [skills CLI](https://github.com/vercel/skills) via
-`npx skills add fakhirali/jupyter-pair` — but note that route copies the skill
-instructions only and cannot provide the plugin.)
+live edits and kernel execution.
 
-**b. OpenCode 2 plugin** — add the clone's `opencode-plugin` directory to
-`plugins` in `~/.config/opencode/opencode.json` (preserve any existing
-entries), then restart **OpenCode 2**:
-
-```jsonc
-// ~/.config/opencode/opencode.json
-{
-  "$schema": "https://opencode.ai/config.json",
-  "plugins": [
-    "/absolute/path/to/jupyter-pair/opencode-plugin"
-  ]
-}
-```
-
-**c. Skill** — either add the plugin's repo as a skill (OpenCode reads skills
-from the clone), or copy it:
-
-```bash
-npx skills add /path/to/jupyter-pair
-```
-
-**d. Verify:**
+### Verify the install
 
 1. Start `jupyter-lab` in (or as an ancestor of) the directory containing your
    notebooks — the bridge discovers servers from `~/Library/Jupyter/runtime/`,
    and the notebook must live under the server's root dir.
 2. Open a notebook in JupyterLab and attach a kernel (`run_cell` requires one).
-3. In **OpenCode 2**, `read demo.ipynb` — done when you see the paginated projection
-   with `# %% [i] code|markdown` markers and no server/dependency error.
+3. In **OpenCode 2**, `read demo.ipynb` — done when you see the paginated
+   projection with `# %% [i] code|markdown` markers and no server/dependency
+   error.
 4. Try `demo.ipynb:N` edits and `jupyter.run_cell`: cells and outputs update
    live in your JupyterLab tab.
 

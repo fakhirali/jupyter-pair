@@ -4,7 +4,7 @@ import path from "node:path"
 import { fileURLToPath } from "node:url"
 
 const script = path.resolve(path.dirname(fileURLToPath(import.meta.url)),
-  "../scripts/jupyter_cells.py")
+  "scripts/jupyter_cells.py")
 const python = process.env.JUPYTER_PAIR_PYTHON || "python3"
 const viewed = new Map()
 
