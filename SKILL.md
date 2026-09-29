@@ -11,6 +11,27 @@ part of the same shared document, so nothing is overwritten — and the server
 autosaves to disk. Writing the `.ipynb` file directly is the dialog path; the
 tools are the live path.
 
+## The notebook is a live, shared surface
+
+The user is working in the same document while you work: typing in cells,
+running them, fixing code, inserting or deleting cells — often concurrently
+with you. You are a collaborator, not the owner.
+
+- **Treat every cell index and every piece of cell text you hold as a snapshot,
+  not the truth.** Re-read (`read NOTEBOOK.ipynb` for the whole notebook and
+  fresh indices, `read NOTEBOOK.ipynb:N` for a target cell) whenever there is
+  doubt or a gap in turns. A re-read is cheap (≈2s); a wrong mutation on stale
+  state is refused (a wasted call) and a blind overwrite would clobber the
+  user — re-reading is always the right skew.
+- **Re-check program state after anything the user runs or you run.** Kernel
+  variables, outputs, and side effects (files, models, servers) change from
+  both sides. Before you reason about "current values" or "what failed",
+  re-read the relevant cell(s) — including their `#|` output lines — rather
+  than trusting earlier results.
+- **Announce your edits as you make them** ("editing cell 12 — replacing the
+  loop"), since the user is watching the cells update live beside their own
+  work; that keeps the two editors from stepping on each other mid-keystroke.
+
 ## Rules that prevent the common errors
 
 Memorize these before your first tool call. Each one exists because the
@@ -36,7 +57,9 @@ underlying tool *requires* it and will refuse otherwise.
    whole notebook first, then work. After any add or delete, later indices
    shift — re-read before touching anything at a higher index.
 4. **Do not carry cell indices across turns from memory or stale attachments.**
-   If the user may have edited since you last read, re-read.
+   If the user may have edited since you last read, re-read. The user is
+   actively editing this notebook beside you — see "The notebook is a live,
+   shared surface."
 5. **Running a cell needs a kernel.** If you get "No kernel session for
    X.ipynb — open the notebook first", the notebook is open but has no kernel
    attached; tell the user to attach one (or open the notebook) and retry.
