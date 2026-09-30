@@ -119,6 +119,55 @@ class RPCInsertTests(unittest.TestCase):
         self.assertEqual(len(ynb.ycells), 0)
 
 
+class ProjectionSearchTests(unittest.TestCase):
+    def big_cell(self):
+        src = "\n".join("pass" for _ in range(400)) + "\ncan_jump = True"
+        return cell("big-cell-id", src)   # beyond the 4000-char projection truncation
+
+    def test_search_finds_match_beyond_projection_truncation(self):
+        ynb = FakeNotebook(self.big_cell())
+        result = run_op(ynb, {"op": "search", "pattern": "can_jump"})
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["hits"][0]["id"], "big-cell-id")
+        self.assertEqual(result["hits"][0]["cell_line"], 401)
+        self.assertIn("can_jump = True", result["hits"][0]["context"])
+
+    def test_search_literal_ignores_regex_syntax(self):
+        ynb = FakeNotebook(cell("dot", "a.c + a1c"))
+        result = run_op(ynb, {"op": "search", "pattern": "a.c", "literal": True})
+        self.assertEqual(len(result["hits"]), 1)
+        escaped = run_op(ynb, {"op": "search", "pattern": "a.c"})
+        self.assertEqual(len(escaped["hits"]), 2)  # `.` matches any char: a.c and a1c
+
+    def test_search_case_insensitive_by_default(self):
+        ynb = FakeNotebook(cell("case", "CAN_JUMP = 1"))
+        result = run_op(ynb, {"op": "search", "pattern": "can_jump"})
+        self.assertEqual(len(result["hits"]), 1)
+        sharp = run_op(ynb, {"op": "search", "pattern": "can_jump", "case_sensitive": True})
+        self.assertEqual(sharp["hits"], [])
+
+    def test_search_scoped_to_cell_id(self):
+        ynb = FakeNotebook(cell("one", "needle here"), cell("two", "needle there"))
+        result = run_op(ynb, {"op": "search", "pattern": "needle", "cell_id": "two"})
+        self.assertEqual([h["id"] for h in result["hits"]], ["two"])
+
+    def test_search_unknown_cell_id_refused(self):
+        ynb = FakeNotebook(cell("one", "needle"))
+        result = run_op(ynb, {"op": "search", "pattern": "needle", "cell_id": "nope"})
+        self.assertFalse(result["ok"])
+        self.assertIn("No cell with id 'nope'", result["error"])
+
+    def test_read_by_cell_line_pages_long_cell(self):
+        ynb = FakeNotebook(self.big_cell())
+        cell_data_run = run_op(ynb, {"op": "read", "cell_id": "big-cell-id",
+                                     "source_line": 296, "source_limit": 10})
+        data = cell_data_run["cell"]
+        self.assertEqual(data["total_source_lines"], 401)
+        self.assertIn("296: pass", data["source"])
+        self.assertNotIn("399:", data["source"])
+        self.assertEqual(data["outputs"], [])
+
+
 class ProjectionTests(unittest.TestCase):
     def test_header_shows_id_and_execution_number(self):
         code = cell("h1E2klD3", "x = 1")

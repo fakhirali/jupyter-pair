@@ -150,8 +150,15 @@ export default {
           path.basename(selector.notebook) + "`) to get each cell's `%% … id=…` header, then target cells as " +
           path.basename(selector.notebook) + ":<id>.", "text/plain")
       }
-      const result = await bridge(notebook,
-        selector.id ? { op: "read", cell_id: selector.id } : { op: "snapshot" },
+      const request = selector.id
+        ? { op: "read", cell_id: selector.id }
+        : { op: "snapshot" }
+      // For a cell read, offset: K pages into the cell's full source (the grep
+      // "cell-line" coordinates); only meaningful when a cell id was given.
+      if (selector.id && typeof input?.offset === "number" && input.offset > 0) {
+        request.source_line = Math.floor(input.offset)
+      }
+      const result = await bridge(notebook, request,
         await directoryFor(context.sessionID), context.signal)
       if (!result.ok) return fileOutput(notebook, result.error, "text/plain")
       if (!selector.id) {
@@ -166,10 +173,17 @@ export default {
       entry.cells.set(result.cell.id, result.cell)
       viewed.set(key, entry)
       const cell = result.cell
-      const exec = cell.execution_count ?? null
+      const paged = cell.source_offset !== undefined
+      const execNote = cell.cell_type === "code" ? ` (exec=${cell.execution_count ?? null})` : " (markdown)"
+      const note = paged
+        ? (() => {
+            const w = cell.source ? cell.source.split("\n").length : 0
+            const first = cell.source_offset, last = cell.source_offset + w - 1
+            return `Cell id=${cell.id}${execNote}: source lines ${first}–${last} of ${cell.total_source_lines}. Continue with offset: ${last + 1}`
+          })()
+        : `This projection shows cell id=${cell.id}${execNote} of ${path.basename(notebook)}; to mutate or run it, address ${path.basename(notebook)}:${cell.id} (read/edit/write) or pass id: "${cell.id}" (jupyter.* tools). Long cells page with offset: <cell-line>.`
       return fileOutput(notebook,
-        fileEnvelope(notebook, "notebook-cell", `${cell.source || ""}${outputsText(cell.outputs)}`,
-          `This projection shows cell id=${cell.id}${cell.cell_type === "code" ? ` (exec=${exec})` : " (markdown)"} of ${path.basename(notebook)}; to mutate or run it, address ${path.basename(notebook)}:${cell.id} (read/edit/write) or pass id: "${cell.id}" (jupyter.* tools).`),
+        fileEnvelope(notebook, "notebook-cell", `${cell.source || ""}${paged ? "" : outputsText(cell.outputs)}`, note),
         "text/plain")
     }
 
@@ -302,12 +316,10 @@ export default {
       }
     }
 
-    // Grep over the notebook projection instead of the raw JSON. Match
-    // FileSystem.Match: { entry: { path, type }, line, offset, text,
-    // submatches: [{ text, start, end }] }. Line numbers are 1-based lines of
-    // the whole-notebook read projection, so they work directly as a
-    // follow-up read(offset: line, limit) and each hit's nearest `# %% … id=…`
-    // marker above it names the cell id to target.
+    // Grep over the notebook: the bridge searches every cell's FULL source
+    // (no 4000-char truncation) on the live server, so hits inside long cells
+    // still surface. Hits report the cell id + cell-line; a matched whole-
+    // notebook read's per-cell read continues deeper with `offset: <cell-line>`.
     async function grepNotebookOutput(selector, input, context) {
       if (typeof input.pattern !== "string" || input.pattern.length === 0) {
         throw new Error("Pattern must not be empty")
@@ -316,28 +328,15 @@ export default {
         throw new Error(`Notebook cells are addressed by their stable id now, not by index — read ${path.basename(selector.notebook)} to get the \`%% … id=…\` headers, then grep ${path.basename(selector.notebook)}:<id> or filter by content.`)
       }
       const notebook = await resolveNotebook(selector.notebook, context.sessionID)
-      const result = await bridge(notebook, { op: "snapshot" },
-        await directoryFor(context.sessionID), context.signal)
+      const result = await bridge(notebook, {
+        op: "search",
+        pattern: input.pattern,
+        literal: input.literal === true,
+        case_sensitive: input.caseSensitive === true,
+        cell_id: selector.id ?? undefined,
+      }, await directoryFor(context.sessionID), context.signal)
       if (!result.ok) throw new Error(result.error)
-      remember(context.sessionID, notebook, result.cells)
 
-      const lines = result.text.split("\n")
-      // Region boundaries: a cell spans [startLine0, endLine0) in 0-based lines
-      const cells = []
-      let current = null
-      for (let i = 0; i < lines.length; i++) {
-        const m = lines[i].match(/^# %% (code|markdown) id=([A-Za-z0-9_-]+)(?: exec=(\S+))?$/)
-        if (m) {
-          if (current) current.endLine0 = i
-          current = { id: m[2], type: m[1], exec: m[3], startLine0: i }
-          cells.push(current)
-        }
-      }
-      if (current) current.endLine0 = lines.length
-      if (cells.length === 0) throw new Error("Projection contained no cell markers; cannot address results.")
-
-      // include filter on cell language: *.py → code cells, *.md → markdown,
-      // anything else (or missing) → all cells
       let typeFilter = null
       if (typeof input.include === "string") {
         const inc = input.include.toLowerCase()
@@ -346,81 +345,43 @@ export default {
         else if (/ipynb/.test(inc)) typeFilter = null
         else return { output: [] }
       }
-      const cellId = selector.id
-      if (cellId) {
-        const region = cells.find((c) => c.id === cellId)
-        if (!region) throw new Error(`Cell id=${cellId} not found in ${notebook}; the notebook may have changed — read it again.`)
-        if (typeFilter && region.type !== typeFilter) return { output: [] }
-      }
-
-      let re
-      try {
-        const source = (input.literal === true)
-          ? input.pattern.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
-          : input.pattern
-        re = new RegExp(source, input.caseSensitive === false ? "gimu" : "gmu")
-      } catch (error) {
-        throw new Error(`Invalid regex pattern: ${error.message}`)
-      }
+      const hits = (result.hits || []).filter((h) => !typeFilter || h.cell_type === typeFilter)
       const limit = typeof input.limit === "number" && input.limit > 0 ? Math.floor(input.limit) : 100
+      const truncated = hits.length > limit || result.hit_cap === true
+      const shown = hits.slice(0, limit)
 
-      const matches = []
-      let offset = 0
-      let truncated = false
-      for (let i = 0; i < lines.length && !truncated; i++) {
-        const lineText = lines[i]
-        const lineNextOffset = offset + lineText.length + 1
-        if (lineText.length && (cellId === null || inCellOf(cells, cellId, i, typeFilter))) {
-          re.lastIndex = 0
-          let m
-          while ((m = re.exec(lineText)) !== null) {
-            const cell = cells.find((c) => i >= c.startLine0 && i < c.endLine0)
-            const cellLine = cell ? i - cell.startLine0 : 0 // marker line itself is line 0's neighborhood ref
-            matches.push({
-              entry: { path: notebook, type: "file" },
-              line: i + 1,
-              offset,
-              text: lineText,
-              submatches: [{ text: m[0], start: m.index, end: m.index + m[0].length }],
-              cellId: cell ? cell.id : null,
-              cellLine,
-            })
-            if (matches.length > limit) { truncated = true; break }
-          }
-        }
-        offset = lineNextOffset
-      }
-
-      const shown = matches.slice(0, limit)
       const parts = shown.length === 0 ? ["No matches found"] : [`Found ${shown.length} matches in ${notebook}`]
       let lastCell = null
       for (const hit of shown) {
-        if (hit.cellId !== lastCell) {
-          lastCell = hit.cellId
-          const region = cells.find((c) => c.id === lastCell)
-          parts.push(`cell id=${lastCell}${region?.exec ? ` (exec=${region.exec})` : ""}:`)
+        if (hit.id !== lastCell) {
+          lastCell = hit.id
+          parts.push(`cell id=${lastCell}${hit.cell_type === "code" ? ` (exec=${hit.execution_count ?? null})` : ""}:`)
         }
-        parts.push(`  Line ${hit.line} (cell id=${hit.cellId}, cell-line ${hit.cellLine}): ${hit.text}`)
+        parts.push(`  Line ${hit.cell_line} (cell id=${hit.id}, cell-line ${hit.cell_line}): ${hit.text}`)
+        if (shown.length <= 10 && hit.context && hit.context !== hit.text) {
+          parts.push(...hit.context.split("\n").map((line) => `    ${line}`))
+        }
       }
       if (truncated) {
-        parts.push("", `(Showing first ${shown.length}. Use a more specific pattern or raise limit; line numbers work with read(offset:).)`)
+        parts.push("", `(Showing first ${shown.length}. Use a more specific pattern or raise limit; read ${path.basename(notebook)}:<id> with offset: <cell-line> to inspect a hit.)`)
       }
       return {
-        output: shown.map(({ cellId, cellLine, ...rest }) => rest),
+        output: shown.map((hit) => ({
+          entry: { path: notebook, type: "file" },
+          line: hit.cell_line,
+          offset: hit.match_start,
+          text: hit.text,
+          submatches: [{ text: hit.text.slice(hit.match_start, hit.match_end), start: hit.match_start, end: hit.match_end }],
+          cellId: hit.id,
+        })),
         content: parts.join("\n"),
         metadata: { matches: shown.length, truncated },
       }
     }
 
-    function inCellOf(cells, notebookId, line0, typeFilter) {
-      const cell = cells.find((c) => line0 >= c.startLine0 && line0 < c.endLine0)
-      if (!cell) return false
-      return !(typeFilter && cell.type !== typeFilter)
-    }
-
     const pathSchema = { type: "string", description: "Path to the .ipynb notebook, absolute or relative to the session directory" }
     const idSchema = { type: "string", description: "The cell's stable id — the `id=…` in the projection's `# %% <type> id=…` header" }
-    const NOTEBOOK_GREP_HINT = " For .ipynb notebooks, this searches the live cell projection instead of raw JSON: each cell header shows its `id` and kernel `exec` number, and hits report `Line N (cell id=<id>, cell-line K)` — the id targets edit/run tools and N works as `read(path, offset: N)` pagination."
+    const NOTEBOOK_GREP_HINT = " For .ipynb notebooks, this searches every cell's FULL source on the live server (not a truncated projection, not raw JSON): hits report `Line N (cell id=<id>, cell-line K)` with a few context lines — the id targets read/edit/run, and N continues deeper into that cell via read(path, offset: N)."
 
     await ctx.tool.transform((editor) => {
       const originals = new Map(editor.list().map((tool) => [tool.id, tool.execute]))

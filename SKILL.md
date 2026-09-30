@@ -78,11 +78,15 @@ underlying tool *requires* it and will refuse otherwise.
 
 ## Steps
 
-1. **Locate content.** `grep` the notebook (`path: "NOTEBOOK.ipynb"`) — hits are
-   annotated `Line N (cell <id>, cell-line K)`: `<id>` is the cell address to
-   target, `N` continues into the projection via `read(path, offset: N)`.
-   Without a search term (or to see everything at once), `read NOTEBOOK.ipynb`
-   for the paginated projection with `# %% <type> id=…` markers.
+1. **Locate content.** `grep` the notebook (`path: "NOTEBOOK.ipynb"`) — this
+   searches every cell's **full source** on the live server, so hits inside
+   long cells still surface. Hits are annotated
+   `Line N (cell id=<id>, cell-line K)` with context lines: `<id>` is the cell
+   address to target, and `N` opens the neighborhood with
+   `read NOTEBOOK.ipynb:<id>`, setting `offset: N` when the match sits deep
+   inside a cell. Without a search term (or to see the overall layout),
+   `read NOTEBOOK.ipynb` for the paginated projection with
+   `# %% <type> id=…` markers.
    Done when: you know the target cell id and have fresh cell text.
 
 2. **Mutate with the right tool for the job:**

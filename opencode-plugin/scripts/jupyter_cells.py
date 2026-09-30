@@ -19,6 +19,7 @@ interface; use the plugin tools, not this script, from a session.
 import asyncio
 import json
 import os
+import re
 import subprocess
 import sys
 from urllib.parse import quote
@@ -305,6 +306,25 @@ def render_projection(ynb):
     return "\n".join(lines)
 
 
+def search_hits(ynb, cell, i, rx, before=3, after=3):
+    """Regex over a cell's FULL source (no truncation); each hit carries the
+    cell's address/id plus surrounding context lines so the caller can see the
+    neighborhood without touching the cell."""
+    src = "".join(cell["source"]) if isinstance(cell["source"], list) else cell["source"]
+    lines = src.split("\n")
+    hits = []
+    for n, line in enumerate(lines, start=1):
+        for m in rx.finditer(line):
+            lo, hi = max(1, n - before), min(len(lines), n + after)
+            context = "\n".join(f"{k}: {lines[k - 1]}" for k in range(lo, hi + 1))
+            hits.append({"index": i, "id": cell.get("id"), "cell_type": cell["cell_type"],
+                         "execution_count": cell.get("execution_count"),
+                         "cell_line": n, "text": trunc(line, 2000),
+                         "context": trunc(context, 4000),
+                         "match_start": m.start(), "match_end": m.end()})
+    return hits
+
+
 def rpc_response(**result):
     print(json.dumps({"ok": True, **result}))
 
@@ -378,7 +398,46 @@ async def yjson(ynb, request, base, token, nb_name):
                 return
         stamp_cell(ynb, i)
         await asyncio.sleep(1)
-        rpc_response(cell=cell_data(ynb, i))
+        data = cell_data(ynb, i)
+        # source_line pages into long cells: return numbered lines [start, start+limit)
+        source_line = request.get("source_line")
+        if isinstance(source_line, int) and source_line > 0:
+            full = data["source"].split("\n")
+            start = max(1, source_line)
+            limit = request.get("source_limit") or 150
+            window = full[start - 1:start - 1 + limit]
+            numbered = "\n".join(f"{k}: {v}" for k, v in
+                                 zip(range(start, start + len(window)), window))
+            data = {**data, "source": numbered, "source_offset": start,
+                    "total_source_lines": len(full), "outputs": []}
+        rpc_response(cell=data)
+        return
+
+    if op == "search":
+        pattern = request.get("pattern")
+        if not isinstance(pattern, str) or not pattern:
+            rpc_error("search needs a non-empty pattern")
+            return
+        scope = None
+        cell_filter = request.get("cell_id")
+        if cell_filter:
+            fi = find_index_by_id(ynb, cell_filter)
+            if fi is None:
+                rpc_error(f"No cell with id {cell_filter!r} in this notebook — re-read it to get current cell ids.")
+                return
+            scope = [fi]
+        try:
+            source = re.escape(pattern) if request.get("literal") else pattern
+            flags = 0 if request.get("case_sensitive") else re.IGNORECASE
+            rx = re.compile(source, re.MULTILINE | flags)
+        except re.error as exc:
+            rpc_error(f"Invalid regex pattern: {exc}")
+            return
+        cells_scope = scope if scope is not None else range(len(ynb.ycells))
+        hits = []
+        for i in cells_scope:
+            hits.extend(search_hits(ynb, ynb.get_cell(i), i, rx))
+        rpc_response(hits=hits[:500], hit_cap=len(hits) > 500)
         return
 
     if op in ("write", "edit", "run", "delete"):

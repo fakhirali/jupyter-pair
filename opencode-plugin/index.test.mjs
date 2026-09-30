@@ -60,7 +60,7 @@ test("native tools keep their declared output shape and delegate ordinary files"
   const grepDelegated = await tools.get("grep").execute(
     { pattern: "x", path: "src" }, { id: "6", sessionID: "s" })
   assert.deepEqual(grepDelegated.output, [])
-  assert.equal(tools.get("grep").description, "grep original For .ipynb notebooks, this searches the live cell projection instead of raw JSON: each cell header shows its `id` and kernel `exec` number, and hits report `Line N (cell id=<id>, cell-line K)` — the id targets edit/run tools and N works as `read(path, offset: N)` pagination.")
+  assert.equal(tools.get("grep").description, "grep original For .ipynb notebooks, this searches every cell's FULL source on the live server (not a truncated projection, not raw JSON): hits report `Line N (cell id=<id>, cell-line K)` with a few context lines — the id targets read/edit/run, and N continues deeper into that cell via read(path, offset: N).")
 
   await assert.rejects(() => tools.get("write").execute(
     { filePath: "demo.ipynb", content: "x = 1" }, { id: "3", sessionID: "s" }),
