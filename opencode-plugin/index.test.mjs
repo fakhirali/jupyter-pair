@@ -31,12 +31,12 @@ function makeContext() {
   return { ctx, tools }
 }
 
-test("cell path parser only accepts .ipynb paths with an optional numeric suffix", () => {
-  assert.deepEqual(parseNotebookPath("notebooks/demo.ipynb:5"), {
-    notebook: "notebooks/demo.ipynb", index: 5,
+test("path parser: numeric suffix stays index-shaped source data, non-numeric is a cell id", () => {
+  assert.deepEqual(parseNotebookPath("notebooks/demo.ipynb:9xG7nZqB"), {
+    notebook: "notebooks/demo.ipynb", index: null, id: "9xG7nZqB",
   })
-  assert.deepEqual(parseNotebookPath("demo.ipynb"), { notebook: "demo.ipynb", index: null })
-  assert.equal(parseNotebookPath("demo.ipynb:abc"), null)
+  assert.deepEqual(parseNotebookPath("demo.ipynb"), { notebook: "demo.ipynb", index: null, id: null })
+  assert.deepEqual(parseNotebookPath("demo.ipynb:5"), { notebook: "demo.ipynb", index: 5, id: null })
   assert.equal(parseNotebookPath("demo.py:5"), null)
 })
 
@@ -51,23 +51,26 @@ test("native tools keep their declared output shape and delegate ordinary files"
   const delegated = await tools.get("read").execute({ filePath: "README.md" }, { id: "1", sessionID: "s" })
   assert.equal(delegated.output, "read original output")
 
-  const nearMiss = await tools.get("read").execute({ filePath: "demo.ipynb:abc" }, { id: "2", sessionID: "s" })
-  assert.equal(nearMiss.output, "read original output")
+  const nonNotebook = await tools.get("read").execute({ filePath: "demo.py:5" }, { id: "2", sessionID: "s" })
+  assert.equal(nonNotebook.output, "read original output")
+
+  const suffixBad = await tools.get("read").execute({ filePath: "demo.ipynb:2" }, { id: "7", sessionID: "s" })
+  assert.match(suffixBad.output.content, /addressed by their stable id/)
 
   const grepDelegated = await tools.get("grep").execute(
     { pattern: "x", path: "src" }, { id: "6", sessionID: "s" })
   assert.deepEqual(grepDelegated.output, [])
-  assert.equal(tools.get("grep").description, "grep original For .ipynb notebooks, this searches the live cell projection instead of raw JSON: hits report `Line N (cell C, cell-line K)`, where C is the cell index to target with edit/run and N matches `read(path, offset: N)` pagination.")
+  assert.equal(tools.get("grep").description, "grep original For .ipynb notebooks, this searches the live cell projection instead of raw JSON: each cell header shows its `id` and kernel `exec` number, and hits report `Line N (cell id=<id>, cell-line K)` — the id targets edit/run tools and N works as `read(path, offset: N)` pagination.")
 
   await assert.rejects(() => tools.get("write").execute(
     { filePath: "demo.ipynb", content: "x = 1" }, { id: "3", sessionID: "s" }),
-    /Add :N to the notebook path/)
+    /Add the cell id to the notebook path/)
 
   await assert.rejects(() => tools.get("edit").execute(
     { filePath: "demo.ipynb", oldString: "a", newString: "b" }, { id: "4", sessionID: "s" }),
-    /Add :N to the notebook path/)
+    /Add the cell id to the notebook path/)
 
   await assert.rejects(() => tools.get("edit").execute(
-    { filePath: "demo.ipynb:5", oldString: "a", newString: "b" }, { id: "5", sessionID: "s" }),
-    /Read cell 5 first/)
+    { filePath: "demo.ipynb:9xG7nZqB", oldString: "a", newString: "b" }, { id: "5", sessionID: "s" }),
+    /Read cell demo\.ipynb:9xG7nZqB first/)
 })
