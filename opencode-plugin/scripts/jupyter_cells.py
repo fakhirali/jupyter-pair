@@ -10,8 +10,9 @@ Usage (machine only, no human CLI):
     echo '<json-request>' | jupyter_cells.py NOTEBOOK.ipynb rpc
 
 The request is one JSON object read from stdin with an `op` field — snapshot,
-read, add, write, edit, run, delete — carrying optimistic-concurrency fields
-(expected_id/hash/count). The response is a single JSON object on stdout:
+read, add, write, edit, run, delete — carrying optimistic-concurrency fields (cell_id + expected_hash; numeric
+`index` remains accepted on read/add for compatibility). The response is a
+single JSON object on stdout:
 {"ok": true, ...} or {"ok": false, "error": "..."}. Requests are the plugin's
 interface; use the plugin tools, not this script, from a session.
 """
@@ -150,7 +151,7 @@ async def run_kernel(base, token, nb_name, code, timeout):
         kernels = http_json("GET", f"{base}/api/kernels", token)
         if len(kernels) == 1:
             print(f"note: no session for {nb_name} (notebook closed or renamed) — "
-                  "using the server's only kernel")
+                  "using the server's only kernel", file=sys.stderr)
             kernel = kernels[0]
     if kernel is None:
         raise SystemExit(f"No kernel session for {nb_name} — open the notebook first.")
@@ -217,14 +218,20 @@ def trunc(s, n):
 
 
 STAMP_KEY = "agent_seen"
-GUARD_MSG = ("cell {i} was edited since it was last viewed — view it first: "
-             "run `read {i}`, then retry")
 
 
 def cell_hash(c):
     src = "".join(c["source"]) if isinstance(c["source"], list) else c["source"]
     import hashlib
     return hashlib.sha1(src.encode()).hexdigest()
+
+
+def find_index_by_id(ynb, cell_id):
+    """Resolve a cell id to its current index (linear scan; notebook-sized)."""
+    for i in range(len(ynb.ycells)):
+        if ynb.get_cell(i).get("id") == cell_id:
+            return i
+    return None
 
 
 def view_state(ynb, i):
@@ -264,7 +271,12 @@ def cell_data(ynb, i):
 
 
 def render_projection(ynb):
-    """Whole-notebook percent-format projection; outputs as '#| ' comment lines."""
+    """Whole-notebook percent-format projection; outputs as '#| ' comment lines.
+
+    Each cell header carries the cell's stable id (the nbformat cell id, which
+    every tool takes as its address) and, for code cells, the kernel
+    execution number.
+    """
     lines = []
     for i in range(len(ynb.ycells)):
         c = ynb.get_cell(i)
@@ -273,7 +285,10 @@ def render_projection(ynb):
             src = "\n".join(f"# {ln}" for ln in src.splitlines())
         else:
             src = trunc(src, 4000)
-        lines += [f"# %% [{i}] {c['cell_type']}", src]
+        marker = f"# %% {c['cell_type']} id={c.get('id') or 'unset'}"
+        if c["cell_type"] == "code":
+            marker += f" exec={c.get('execution_count') or 'None'}"
+        lines += [marker, src]
         for o in c.get("outputs") or []:
             t = o.get("output_type")
             if t == "stream":
@@ -299,19 +314,30 @@ def rpc_error(message):
 
 
 def rpc_target(ynb, request):
-    i = request.get("index")
-    if not isinstance(i, int) or not 0 <= i < len(ynb.ycells):
-        return None, f"Invalid cell index {i!r}; notebook has {len(ynb.ycells)} cells (0..{len(ynb.ycells) - 1})."
+    """Resolve the target cell from a cell_id (the address) and apply the
+    content-freshness guards. Returns (index, cell, error): a stale position is
+    not a conflict — the id resolves wherever the cell now lives — but a stale
+    source hash, or an unread cell, is real and must be refused."""
+    cell_id = request.get("cell_id")
+    i = find_index_by_id(ynb, cell_id) if cell_id else None
+    if i is None:
+        return None, None, (
+            f"No cell with id {cell_id!r} in this notebook — re-read it "
+            "(`read NOTEBOOK.ipynb`) to get current cell ids.")
     cell = ynb.get_cell(i)
-    if not request.get("expected_id") or not request.get("expected_hash"):
-        return None, f"Cell {i} has not been read in this session; read it before writing or running."
-    if cell.get("id") != request["expected_id"]:
-        return None, f"Cell {i} moved or was replaced since it was read; read the cell again."
+    if not request.get("expected_hash"):
+        return None, None, (
+            f"Cell id={cell_id} has not been read in this session; read it "
+            "before writing or running.")
     if cell_hash(cell) != request["expected_hash"]:
-        return None, f"Cell {i} changed since it was read; read the cell again before retrying."
-    if view_state(ynb, i)[0] != "fresh":
-        return None, GUARD_MSG.format(i=i)
-    return cell, None
+        return None, None, (
+            f"Cell id={cell_id} changed since it was read; read it again "
+            "before retrying.")
+    if view_state(ynb, i)[0] == "edited":
+        return None, None, (
+            f"Cell id={cell_id} was edited since it was last viewed — "
+            "read NOTEBOOK.ipynb:" + cell_id + ", then retry.")
+    return i, cell, None
 
 
 async def do_run(ynb, request, base, token, nb_name):
@@ -338,21 +364,28 @@ async def yjson(ynb, request, base, token, nb_name):
         rpc_response(cells=cells, text=render_projection(ynb))
         return
     if op == "read":
-        i = request.get("index")
-        if not isinstance(i, int) or not 0 <= i < len(ynb.ycells):
-            rpc_error(f"Invalid cell index {i!r}; notebook has {len(ynb.ycells)} cells.")
-            return
+        i = None
+        cell_id = request.get("cell_id")
+        if cell_id:
+            i = find_index_by_id(ynb, cell_id)
+            if i is None:
+                rpc_error(f"No cell with id {cell_id!r} in this notebook — re-read it to get current cell ids.")
+                return
+        else:
+            i = request.get("index")
+            if not isinstance(i, int) or not 0 <= i < len(ynb.ycells):
+                rpc_error(f"Invalid cell index {i!r}; pass a cell id (`cell_id`) or a numeric cell index within {len(ynb.ycells)}.")
+                return
         stamp_cell(ynb, i)
         await asyncio.sleep(1)
         rpc_response(cell=cell_data(ynb, i))
         return
 
     if op in ("write", "edit", "run", "delete"):
-        cell, error = rpc_target(ynb, request)
+        i, cell, error = rpc_target(ynb, request)
         if error:
             rpc_error(error)
             return
-        i = request["index"]
         if op == "run":
             _, execution_count = await do_run(
                 ynb, {"index": i, "timeout": request.get("timeout")},
@@ -374,7 +407,7 @@ async def yjson(ynb, request, base, token, nb_name):
                 replace_all = request.get("replace_all") is True
                 if count == 0 or (count != 1 and not replace_all):
                     qualifier = "at least once" if replace_all else "exactly once"
-                    rpc_error(f"old_string matched {count} times in cell {i}; it must match {qualifier}")
+                    rpc_error(f"old_string matched {count} times in cell id={request.get('cell_id')}; it must match {qualifier}")
                     return
                 source = cell["source"].replace(old, new if isinstance(new, str) else "",
                                                 -1 if replace_all else 1)
@@ -401,8 +434,16 @@ async def yjson(ynb, request, base, token, nb_name):
         cell = {"cell_type": cell_type, "source": source, "metadata": {}}
         if cell_type == "code":
             cell.update(execution_count=None, outputs=[])
+        after_id = request.get("after_id")
         index = request.get("index")
-        if index is None:
+        if after_id is not None:
+            fi = find_index_by_id(ynb, after_id)
+            if fi is None:
+                rpc_error(f"No cell with id {after_id!r} in this notebook — re-read it to get current cell ids.")
+                return
+            index = fi + 1
+            ynb.ycells.insert(index, ynb.create_ycell(cell))
+        elif index is None:
             ynb.append_cell(cell)
             index = len(ynb.ycells) - 1
         elif isinstance(index, int) and 0 <= index <= len(ynb.ycells):

@@ -14,10 +14,10 @@ jupyter-pair instead joins the notebook's real-time collaboration room as a CRDT
 
 ## Features
 
-- **Live cell editing** — `add`, `insert at any index`, `edit`, `delete`, `read`
+- **Live cell editing** — `add`, `insert after any cell`, `edit`, `delete`, `read`
 - **Run cells** — executes through your kernel and writes outputs into the shared document so they render in your tab
-- **Notebook-aware native tools** — `read`, `write`, `edit`, and `grep` understand `.ipynb` paths: `demo.ipynb:N` targets cell N, and grep hits report the cell index directly
-- **Edited-since-viewed guard** — the agent cannot mutate or run a cell whose content changed since it last viewed it; it must re-read first, so it never clobbers your keystrokes
+- **Notebook-aware native tools** — `read`, `write`, `edit`, and `grep` understand `.ipynb` paths: each cell is addressed by its stable **cell id** (`demo.ipynb:9xG7nZqB`) shown in the projection's `# %% <type> id=… [exec=…]` headers, and grep hits report the cell id and line directly
+- **Edited-since-viewed guard** — the agent cannot mutate or run a cell whose content changed since it last viewed it; it must re-read first, so it never clobbers your keystrokes (positions are *not* guarded — your inserts/deletes never false-refuse the agent)
 - **Zero hardcoding** — discovers the running server, port, and auth token from Jupyter's runtime files; re-execs itself with the server's Python if needed
 
 ## Install
@@ -87,9 +87,9 @@ live edits and kernel execution.
    and the notebook must live under the server's root dir.
 2. Open a notebook in JupyterLab and attach a kernel (`run_cell` requires one).
 3. In **OpenCode 2**, `read demo.ipynb` — done when you see the paginated
-   projection with `# %% [i] code|markdown` markers and no server/dependency
+   projection with `# %% <type> id=… [exec=…]` headers and no server/dependency
    error.
-4. Try `demo.ipynb:N` edits and `jupyter.run_cell`: cells and outputs update
+4. Try `demo.ipynb:<id>` edits and `jupyter.run_cell`: cells and outputs update
    live in your JupyterLab tab.
 
 Smoke-tests: `node --test opencode-plugin/index.test.mjs` (plugin tools and
@@ -97,12 +97,12 @@ path routing) and `pytest tests/` (RPC guards).
 
 ## Usage
 
-Ask naturally: "add a cell that plots X", "run cell 3", "grep the notebook for
+Ask naturally: "add a cell that plots X", "grep the notebook for
 knapsack". The agent uses the plugin tools; cells and outputs appear live in
-your tab. Tool conventions the agent follows: `read` (bare or `:N` path), `edit`/
-`write` (require `:N`), grep (annotates hits with cell indices), and
+your tab. Tool conventions the agent follows: `read` (bare or `:<id>` path),
+`edit`/`write` (require `:<id>`), grep (annotates hits with cell ids), and
 `jupyter.add_cell` / `jupyter.run_cell` / `jupyter.delete_cell` (plain path +
-`index` argument).
+`id` argument, `after_id` for insertion placement).
 
 ## How it works
 
